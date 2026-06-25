@@ -1,0 +1,11 @@
+info.md
+*.pdf
+.gitignore
+局部能力提取方案_PPT大纲.md
+*.tex
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+artifacts/eval/*.jsonl
+artifacts/eval/*.json

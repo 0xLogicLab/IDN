@@ -1,0 +1,12 @@
+teacher_model: /mnt/8T/cl/models/Qwen2-7B-Instruct
+base_model: /mnt/8T/cl/models/Qwen2-1.5B-Instruct
+dataset_name: tatsu-lab/alpaca
+dataset_split: train
+num_samples: 20
+max_new_tokens: 160
+temperature: 0.0
+top_p: 1.0
+torch_dtype: bfloat16
+device_map: auto
+output_path: artifacts/eval/qwen25_7b_teacher_vs_15b_base_alpaca20.jsonl
+summary_path: artifacts/eval/qwen25_7b_teacher_vs_15b_base_alpaca20_summary.json
