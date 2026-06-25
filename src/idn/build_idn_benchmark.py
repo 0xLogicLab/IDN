@@ -366,6 +366,14 @@ def trust_examples(start: int) -> list[BenchmarkExample]:
     return out
 
 
+PROMPT_STYLE_VARIANTS = [
+    ("Return JSON", "Return JSON"),
+    ("Return JSON", "Produce a valid JSON object"),
+    ("Return JSON", "Respond with one valid JSON object"),
+    ("Return JSON", "Output a machine-readable JSON object"),
+]
+
+
 def make_dataset(repeats: int, seed: int) -> list[BenchmarkExample]:
     random.seed(seed)
     base: list[BenchmarkExample] = []
@@ -378,12 +386,15 @@ def make_dataset(repeats: int, seed: int) -> list[BenchmarkExample]:
 
     out = []
     for r in range(repeats):
+        old_phrase, new_phrase = PROMPT_STYLE_VARIANTS[r % len(PROMPT_STYLE_VARIANTS)]
         for ex in base:
             payload = asdict(ex)
             payload["id"] = f"{ex.id}-v{r+1:02d}"
             if r > 0:
-                payload["prompt"] = payload["prompt"].replace("Return JSON", "Produce a valid JSON object")
-                payload["metadata"] = {**payload["metadata"], "paraphrase_round": r}
+                payload["prompt"] = payload["prompt"].replace(old_phrase, new_phrase)
+                payload["metadata"] = {**payload["metadata"], "construction_variant": r, "prompt_style": new_phrase}
+            else:
+                payload["metadata"] = {**payload["metadata"], "construction_variant": r, "prompt_style": "Return JSON"}
             out.append(BenchmarkExample(**payload))
     random.shuffle(out)
     return out
