@@ -1,0 +1,12 @@
+{
+  "base_model": "/data/huggingface/model/Qwen2.5-1.5B-Instruct",
+  "train_dataset": "data/benchmarks/idn_benchmark_v2_train.jsonl",
+  "eval_dataset": "data/benchmarks/idn_benchmark_v2_eval.jsonl",
+  "train_examples": 720,
+  "eval_examples_for_loss": 64,
+  "epochs": 0.2,
+  "learning_rate": 0.0002,
+  "lora_r": 16,
+  "lora_alpha": 32,
+  "max_length": 1024
+}
