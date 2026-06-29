@@ -1,8 +1,0 @@
-big_model: openai/gpt-4o
-small_model: openai/gpt-4o-mini
-dataset: CoLA in-domain dev
-dataset_url: https://raw.githubusercontent.com/nyu-mll/CoLA-baselines/master/acceptability_corpus/cola_public/tokenized/in_domain_dev.tsv
-num_samples: 50
-task: binary grammatical acceptability classification
-output_path: artifacts/eval/cola_big_vs_small.jsonl
-summary_path: artifacts/eval/cola_big_vs_small_summary.json
