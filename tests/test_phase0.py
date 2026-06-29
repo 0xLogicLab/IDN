@@ -59,6 +59,9 @@ def test_registry_loads_all_phase0_capabilities():
         "sst2",
     }
     assert registry["sst2"].config.dataset_path == "/data/huggingface/dataset/glue_sst2"
+    assert registry["sst2"].spec is not None
+    assert registry["cola"].spec is not None
+    assert registry["gsm8k"].spec is None
 
 
 def test_cli_list_capabilities_prints_resolved_paths(capsys):
@@ -77,4 +80,3 @@ def test_cli_list_capabilities_prints_resolved_paths(capsys):
     assert "sst2" in captured.out
     assert "/data/huggingface/model/Qwen2.5-1.5B-Instruct" in captured.out
     assert "/data/huggingface/model/Qwen2.5-7B-Instruct" in captured.out
-

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,7 @@ class CapabilitySpec(Protocol):
     metric_name: str
     higher_is_better: bool
 
-    def load_split(self, split: str, limit: int = None) -> List[Example]:
+    def load_split(self, split: str, limit: Optional[int] = None) -> List[Example]:
         ...
 
     def format_prompt(self, ex: Example) -> List[Dict[str, str]]:
@@ -27,7 +27,7 @@ class CapabilitySpec(Protocol):
     def parse_prediction(self, raw_text: str) -> Any:
         ...
 
-    def target_text(self, ex: Example, teacher_text: str = None) -> str:
+    def target_text(self, ex: Example, teacher_text: Optional[str] = None) -> str:
         ...
 
     def metric(self, preds: List[Any], refs: List[Any]) -> Dict[str, float]:
@@ -35,4 +35,3 @@ class CapabilitySpec(Protocol):
 
     def verify(self, raw_text: str, parsed: Any) -> bool:
         ...
-
