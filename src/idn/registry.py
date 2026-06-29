@@ -8,6 +8,7 @@ from typing import Callable, Dict, Iterable, Optional
 
 from idn.capabilities.base import CapabilitySpec
 from idn.capabilities.cola import CoLASpec
+from idn.capabilities.gsm8k import GSM8KSpec
 from idn.capabilities.sst2 import SST2Spec
 from idn.config import (
     DEFAULT_CAPABILITY_DIR,
@@ -30,6 +31,7 @@ class CapabilityRegistration:
 
 SPEC_FACTORIES: Dict[str, Callable[[CapabilityConfig], CapabilitySpec]] = {
     "cola": CoLASpec,
+    "gsm8k": GSM8KSpec,
     "sst2": SST2Spec,
 }
 
