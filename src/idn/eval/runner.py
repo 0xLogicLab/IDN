@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +66,23 @@ def run_eval(
     parsed_preds = []
     refs = []
     latencies_ms = []
+    started_at = datetime.now(timezone.utc).isoformat()
+    result = _build_result(
+        spec=spec,
+        split=split,
+        requested_examples=len(examples),
+        completed_examples=0,
+        base_model_path=base_model_path,
+        adapter_path=adapter_path,
+        dtype=dtype,
+        local_files_only=local_files_only,
+        metrics={},
+        latencies_ms=[],
+        records=[],
+        created_at=started_at,
+        status="running",
+    )
+    write_eval_artifact(output_path, result)
 
     for ex in examples:
         record = _eval_one(
@@ -79,32 +97,41 @@ def run_eval(
         parsed_preds.append(record["parsed_prediction"])
         refs.append(ex.reference)
         latencies_ms.append(record["latency_ms"])
+        metrics = spec.metric(parsed_preds, refs)
+        result = _build_result(
+            spec=spec,
+            split=split,
+            requested_examples=len(examples),
+            completed_examples=len(records),
+            base_model_path=base_model_path,
+            adapter_path=adapter_path,
+            dtype=dtype,
+            local_files_only=local_files_only,
+            metrics=metrics,
+            latencies_ms=latencies_ms,
+            records=records,
+            created_at=started_at,
+            status="running",
+        )
+        write_eval_artifact(output_path, result)
 
     metrics = spec.metric(parsed_preds, refs)
-    result = {
-        "capability": spec.id,
-        "split": split,
-        "num_examples": len(examples),
-        "model": {
-            "base_model_path": base_model_path,
-            "adapter_path": adapter_path,
-            "dtype": dtype,
-            "local_files_only": local_files_only,
-        },
-        "metrics": metrics,
-        "latency": {
-            "p50_ms": percentile(latencies_ms, 50),
-            "p95_ms": percentile(latencies_ms, 95),
-        },
-        "lineage": {
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        },
-        "predictions": records,
-    }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as handle:
-        json.dump(result, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    result = _build_result(
+        spec=spec,
+        split=split,
+        requested_examples=len(examples),
+        completed_examples=len(records),
+        base_model_path=base_model_path,
+        adapter_path=adapter_path,
+        dtype=dtype,
+        local_files_only=local_files_only,
+        metrics=metrics,
+        latencies_ms=latencies_ms,
+        records=records,
+        created_at=started_at,
+        status="complete",
+    )
+    write_eval_artifact(output_path, result)
     _print_eval_footer(log=log, metrics=metrics, latency=result["latency"], output_path=output_path)
     return result
 
@@ -138,6 +165,55 @@ def percentile(values: List[float], pct: int) -> float:
     ordered = sorted(values)
     index = int(round((pct / 100.0) * (len(ordered) - 1)))
     return float(ordered[index])
+
+
+def _build_result(
+    spec: CapabilitySpec,
+    split: str,
+    requested_examples: int,
+    completed_examples: int,
+    base_model_path: str,
+    adapter_path: Optional[str],
+    dtype: str,
+    local_files_only: bool,
+    metrics: Dict[str, float],
+    latencies_ms: List[float],
+    records: List[Dict[str, Any]],
+    created_at: str,
+    status: str,
+) -> Dict[str, Any]:
+    return {
+        "capability": spec.id,
+        "split": split,
+        "status": status,
+        "num_examples": requested_examples,
+        "completed_examples": completed_examples,
+        "model": {
+            "base_model_path": base_model_path,
+            "adapter_path": adapter_path,
+            "dtype": dtype,
+            "local_files_only": local_files_only,
+        },
+        "metrics": metrics,
+        "latency": {
+            "p50_ms": percentile(latencies_ms, 50),
+            "p95_ms": percentile(latencies_ms, 95),
+        },
+        "lineage": {
+            "created_at": created_at,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "predictions": records,
+    }
+
+
+def write_eval_artifact(output_path: Path, result: Dict[str, Any]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_name("{0}.tmp".format(output_path.name))
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        json.dump(result, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.replace(str(tmp_path), str(output_path))
 
 
 def _print_eval_header(

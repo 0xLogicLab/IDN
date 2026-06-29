@@ -439,15 +439,15 @@ artifacts/packages/{capability}_v1/
 
 ## 13. Implementation phases (build in this order — each ends in a runnable check)
 
-**Phase 0 — skeleton.** `pyproject.toml`, package, `cli.py` dispatch, `config.py` (YAML +
+[finished] **Phase 0 — skeleton.** `pyproject.toml`, package, `cli.py` dispatch, `config.py` (YAML +
 machine-merge), `registry.py`. `idn list-capabilities` works. `pytest` runs (empty-ish).
 *Check: CLI help + list-capabilities print resolved paths.*
 
-**Phase 1 — capability layer on the cheap task.** Implement `CapabilitySpec` for **sst2**
+[finished] **Phase 1 — capability layer on the cheap task.** Implement `CapabilitySpec` for **sst2**
 (easiest) and **cola**, plus `metrics.py` core. Unit-test parse + metric on fixtures.
 *Check: `test_capabilities.py` green; metric on 20 hand-labeled rows is sane.*
 
-**Phase 2 — models + eval (no training yet).** `models/loader.py` (load base, generate),
+[finished] **Phase 2 — models + eval (no training yet).** `models/loader.py` (load base, generate),
 `eval/runner.py`. Run `idn eval` for **base student** and **teacher** on sst2 val (limit 200).
 *Check: two eval jsons with believable accuracy; teacher > base.*
 

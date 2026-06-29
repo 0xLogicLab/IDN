@@ -19,7 +19,7 @@ dev = [
 
 [project.scripts]
 idn = "idn.cli:main"
+idn-chat = "idn.chat:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

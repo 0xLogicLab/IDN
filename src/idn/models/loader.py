@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+from threading import Thread
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional
 
 os.environ.setdefault("USE_TF", "0")
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
@@ -129,6 +130,54 @@ class ChatModel:
         generated = output_ids[0][prompt_tokens:]
         return self.tokenizer.decode(generated, skip_special_tokens=True).strip()
 
+    def stream_generate(
+        self,
+        messages: List[Dict[str, str]],
+        max_new_tokens: int,
+    ) -> Iterator[str]:
+        if self.model is None or self.tokenizer is None:
+            self.load()
+
+        try:
+            import torch
+            from transformers import TextIteratorStreamer
+        except ImportError as exc:
+            raise ModelLoadError(
+                "torch and transformers are required for streaming generation"
+            ) from exc
+
+        prompt = self.render_prompt(messages)
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        inputs = {
+            key: value.to(self.model.device)
+            for key, value in inputs.items()
+        }
+        streamer = TextIteratorStreamer(
+            self.tokenizer,
+            skip_prompt=True,
+            skip_special_tokens=True,
+        )
+        generation_kwargs = dict(
+            inputs,
+            streamer=streamer,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            max_new_tokens=max_new_tokens,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+
+        def _generate() -> None:
+            with torch.no_grad():
+                self.model.generate(**generation_kwargs)
+
+        thread = Thread(target=_generate)
+        thread.start()
+        for chunk in streamer:
+            yield chunk
+        thread.join()
+
     def render_prompt(self, messages: List[Dict[str, str]]) -> str:
         if self.tokenizer is not None and hasattr(self.tokenizer, "apply_chat_template"):
             return self.tokenizer.apply_chat_template(
@@ -140,4 +189,3 @@ class ChatModel:
             "{0}: {1}".format(message["role"], message["content"])
             for message in messages
         ) + "\nassistant:"
-
