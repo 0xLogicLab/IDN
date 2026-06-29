@@ -1,0 +1,17 @@
+sweep:
+  base_models:
+    - /data/huggingface/model/Qwen2.5-1.5B-Instruct
+  lora_r:
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+  lora_target:
+    - qv
+    - qkvo
+    - qkvo+mlp
+  target_source:
+    - gold
+    - teacher
+

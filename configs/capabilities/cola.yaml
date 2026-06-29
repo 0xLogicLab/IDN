@@ -1,0 +1,17 @@
+capability:
+  id: cola
+  name: CoLA grammatical acceptability
+  metric_name: accuracy
+  secondary_metrics:
+    - mcc
+  higher_is_better: true
+  dataset_path: /data/huggingface/dataset/glue_cola
+  train_split: train
+  eval_split: validation
+  eval_limit: 1000
+  max_new_tokens: 8
+  epsilon: 0.01
+  target_source: gold
+  prompt:
+    template: "Is this sentence grammatically acceptable? Answer yes or no."
+

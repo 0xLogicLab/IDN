@@ -1,0 +1,15 @@
+capability:
+  id: mbpp
+  name: MBPP Python programming
+  metric_name: pass@1
+  higher_is_better: true
+  dataset_path: /data/huggingface/dataset/mbpp
+  train_split: train
+  eval_split: test
+  eval_limit: 257
+  max_new_tokens: 512
+  epsilon: 0.02
+  target_source: gold
+  prompt:
+    template: "Write Python code that satisfies the prompt and tests."
+

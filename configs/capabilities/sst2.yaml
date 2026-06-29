@@ -1,0 +1,15 @@
+capability:
+  id: sst2
+  name: SST-2 sentiment classification
+  metric_name: accuracy
+  higher_is_better: true
+  dataset_path: /data/huggingface/dataset/glue_sst2
+  train_split: train
+  eval_split: validation
+  eval_limit: 1000
+  max_new_tokens: 8
+  epsilon: 0.01
+  target_source: gold
+  prompt:
+    template: "Classify the sentence sentiment as positive or negative."
+

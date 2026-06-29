@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "idn"
+version = "0.1.0"
+description = "IDN capability extraction experiment pipeline"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+]
+
+[project.scripts]
+idn = "idn.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

@@ -1,0 +1,14 @@
+training:
+  dtype: bfloat16
+  lora:
+    r: 16
+    alpha: null
+    dropout: 0.05
+    target_modules: qkvo
+  lr: 2.0e-4
+  scheduler: cosine
+  warmup_ratio: 0.03
+  epochs: 2
+  max_length: 1024
+  gradient_checkpointing: true
+

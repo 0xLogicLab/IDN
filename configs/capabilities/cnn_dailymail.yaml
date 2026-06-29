@@ -1,0 +1,15 @@
+capability:
+  id: cnn_dailymail
+  name: CNN/DailyMail summarization
+  metric_name: rougeL
+  higher_is_better: true
+  dataset_path: /data/huggingface/dataset/cnn_dailymail
+  train_split: train
+  eval_split: validation
+  eval_limit: 500
+  max_new_tokens: 160
+  epsilon: 0.01
+  target_source: gold
+  prompt:
+    template: "Summarize the article concisely."
+
