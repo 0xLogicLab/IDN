@@ -9,3 +9,4 @@ __pycache__/
 *.egg-info/
 artifacts/eval/*.jsonl
 artifacts/eval/*.json
+tests/

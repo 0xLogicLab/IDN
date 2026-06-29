@@ -86,6 +86,10 @@ def get_spec(
     return registration.spec
 
 
+def spec_from_config(config: CapabilityConfig) -> Optional[CapabilitySpec]:
+    return _build_spec(config)
+
+
 def _build_spec(config: CapabilityConfig) -> Optional[CapabilitySpec]:
     factory = SPEC_FACTORIES.get(config.id)
     if factory is None:

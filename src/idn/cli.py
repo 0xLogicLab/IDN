@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
-from typing import Callable, List
+from typing import List, Optional
 
 os.environ.setdefault("USE_TF", "0")
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-from idn.config import DEFAULT_CAPABILITY_DIR, DEFAULT_MACHINE_CONFIG, ConfigError
-from idn.registry import iter_capabilities
+from idn.config import (
+    DEFAULT_CAPABILITY_DIR,
+    DEFAULT_MACHINE_CONFIG,
+    ConfigError,
+    load_resolved_config,
+)
+from idn.eval.runner import run_eval
+from idn.registry import iter_capabilities, spec_from_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,11 +44,61 @@ def build_parser() -> argparse.ArgumentParser:
     )
     list_parser.set_defaults(func=cmd_list_capabilities)
 
+    eval_parser = subparsers.add_parser("eval", help="Evaluate a base or adapter model.")
+    eval_parser.add_argument("--config", required=True, help="Capability YAML.")
+    eval_parser.add_argument(
+        "--split",
+        default=None,
+        help="Dataset split to evaluate. Defaults to capability eval_split.",
+    )
+    eval_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum labeled examples to evaluate.",
+    )
+    eval_parser.add_argument(
+        "--model",
+        default=None,
+        help="Model path. Defaults to machine student_model_path.",
+    )
+    eval_parser.add_argument(
+        "--adapter",
+        default=None,
+        help="Optional LoRA adapter path.",
+    )
+    eval_parser.add_argument(
+        "--output",
+        default=None,
+        help="Output eval JSON path.",
+    )
+    eval_parser.add_argument(
+        "--dtype",
+        default=None,
+        help="bfloat16 or float32. Defaults to machine dtype.",
+    )
+    eval_parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        help="Override capability max_new_tokens.",
+    )
+    eval_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print each eval input, reference label, raw prediction, and parsed prediction.",
+    )
+    eval_parser.add_argument(
+        "--override",
+        action="store_true",
+        help="Overwrite an existing eval output without prompting.",
+    )
+    eval_parser.set_defaults(func=cmd_eval)
+
     for name in (
         "gen-teacher",
         "build-sft",
         "train-lora",
-        "eval",
         "sweep",
         "export",
         "serve",
@@ -91,6 +148,95 @@ def cmd_not_implemented(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    resolved = load_resolved_config(Path(args.config), Path(args.machine))
+    spec = spec_from_config(resolved.capability)
+    if spec is None:
+        raise SystemExit(
+            "Capability '{0}' is not implemented yet.".format(resolved.capability.id)
+        )
+
+    split = args.split or resolved.capability.eval_split
+    limit = args.limit if args.limit is not None else resolved.capability.eval_limit
+    model_path = args.model or resolved.machine.student_model_path
+    dtype = args.dtype or resolved.machine.dtype
+    output_path = Path(args.output) if args.output else default_eval_output_path(
+        artifact_dir=Path(resolved.machine.artifact_dir),
+        capability_id=resolved.capability.id,
+        split=split,
+        model_path=model_path,
+        adapter_path=args.adapter,
+        limit=limit,
+        dtype=dtype,
+    )
+    if output_path.exists() and not args.override:
+        if not confirm_overwrite(output_path):
+            print("Aborted; output already exists: {0}".format(output_path))
+            return 1
+
+    run_eval(
+        spec=spec,
+        split=split,
+        limit=limit,
+        base_model_path=model_path,
+        adapter_path=args.adapter,
+        output_path=output_path,
+        dtype=dtype,
+        device=resolved.machine.device,
+        max_new_tokens=args.max_new_tokens or resolved.capability.max_new_tokens,
+        local_files_only=resolved.machine.local_files_only,
+        batch_size=resolved.machine.eval_batch_size,
+        verbose=args.verbose,
+    )
+    return 0
+
+
+def default_eval_output_path(
+    artifact_dir: Path,
+    capability_id: str,
+    split: str,
+    model_path: str,
+    adapter_path: Optional[str],
+    limit: Optional[int],
+    dtype: str,
+) -> Path:
+    model_name = safe_slug(Path(model_path).name or model_path)
+    adapter_name = safe_slug(Path(adapter_path).name) if adapter_path else "base"
+    limit_name = "full" if limit is None else str(limit)
+    filename = "{capability}_{split}_{model}_{adapter}_limit{limit}_{dtype}.json".format(
+        capability=safe_slug(capability_id),
+        split=safe_slug(split),
+        model=model_name,
+        adapter=adapter_name,
+        limit=limit_name,
+        dtype=safe_slug(dtype),
+    )
+    return artifact_dir / "eval" / filename
+
+
+def safe_slug(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
+    slug = slug.strip("-._")
+    return slug or "unknown"
+
+
+def confirm_overwrite(path: Path) -> bool:
+    if not sys.stdin.isatty():
+        print(
+            "Output already exists: {0}. Re-run with --override to overwrite.".format(path),
+            file=sys.stderr,
+        )
+        return False
+    while True:
+        answer = input("Output already exists: {0}. Override? [y/n]: ".format(path))
+        answer = answer.strip().lower()
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        print("Please answer y or n.")
+
+
 def main(argv: List[str] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -104,4 +250,3 @@ def main(argv: List[str] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
