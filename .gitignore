@@ -10,3 +10,4 @@ __pycache__/
 artifacts/eval/*.jsonl
 artifacts/eval/*.json
 tests/
+artifacts/

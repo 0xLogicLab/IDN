@@ -95,6 +95,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_parser.set_defaults(func=cmd_eval)
 
+    viz_parser = subparsers.add_parser(
+        "visualize-embeddings",
+        help="Visualize sampled request embeddings from all configured datasets.",
+    )
+    viz_parser.add_argument(
+        "--config-dir",
+        default=str(DEFAULT_CAPABILITY_DIR),
+        help="Directory containing capability YAML files.",
+    )
+    viz_parser.add_argument(
+        "--split",
+        default="train",
+        help="Dataset split to sample. Use 'configured' for each capability train_split.",
+    )
+    viz_parser.add_argument(
+        "--samples-per-dataset",
+        type=int,
+        default=500,
+        help="Maximum examples to sample from each dataset.",
+    )
+    viz_parser.add_argument(
+        "--output-dir",
+        default="artifacts/analysis",
+        help="Directory for plot, coordinates CSV, and diagnostics JSON.",
+    )
+    viz_parser.add_argument(
+        "--projection",
+        choices=("tsne", "pca"),
+        default="tsne",
+        help="2D projection method.",
+    )
+    viz_parser.add_argument(
+        "--seed",
+        type=int,
+        default=13,
+        help="Sampling and projection seed.",
+    )
+    viz_parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=2000,
+        help="Maximum request text characters per example before embedding.",
+    )
+    viz_parser.add_argument(
+        "--perplexity",
+        type=float,
+        default=30.0,
+        help="t-SNE perplexity; ignored for PCA.",
+    )
+    viz_parser.set_defaults(func=cmd_visualize_embeddings)
+
     for name in (
         "gen-teacher",
         "build-sft",
@@ -139,6 +190,36 @@ def cmd_list_capabilities(args: argparse.Namespace) -> int:
         )
     print("\nteacher_model_path: {0}".format(rows[0].machine.teacher_model_path))
     print("machine: {0}".format(rows[0].machine.name))
+    return 0
+
+
+def cmd_visualize_embeddings(args: argparse.Namespace) -> int:
+    from idn.analysis.embedding_viz import visualize_dataset_embeddings
+
+    split = None if args.split == "configured" else args.split
+    result = visualize_dataset_embeddings(
+        config_dir=Path(args.config_dir),
+        machine_path=Path(args.machine),
+        split=split,
+        samples_per_dataset=args.samples_per_dataset,
+        output_dir=Path(args.output_dir),
+        projection=args.projection,
+        seed=args.seed,
+        max_chars=args.max_chars,
+        perplexity=args.perplexity,
+    )
+    print("Embedding visualization complete.")
+    print("samples: {0}".format(result["samples"]))
+    print("datasets: {0}".format(", ".join(result["datasets"])))
+    print("silhouette: {0}".format(result["diagnostics"]["silhouette"]))
+    print(
+        "linear_cv_accuracy_mean: {0}".format(
+            result["diagnostics"]["linear_cv_accuracy_mean"]
+        )
+    )
+    print("plot: {0}".format(result["outputs"]["plot"]))
+    print("coordinates: {0}".format(result["outputs"]["csv"]))
+    print("diagnostics: {0}".format(result["outputs"]["json"]))
     return 0
 
 
