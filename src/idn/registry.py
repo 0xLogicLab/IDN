@@ -7,8 +7,11 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, Optional
 
 from idn.capabilities.base import CapabilitySpec
+from idn.capabilities.cnn_dailymail import CNNDailyMailSpec
 from idn.capabilities.cola import CoLASpec
 from idn.capabilities.gsm8k import GSM8KSpec
+from idn.capabilities.mbpp import MBPPSpec
+from idn.capabilities.squad import SQuADSpec
 from idn.capabilities.sst2 import SST2Spec
 from idn.config import (
     DEFAULT_CAPABILITY_DIR,
@@ -30,8 +33,11 @@ class CapabilityRegistration:
 
 
 SPEC_FACTORIES: Dict[str, Callable[[CapabilityConfig], CapabilitySpec]] = {
+    "cnn_dailymail": CNNDailyMailSpec,
     "cola": CoLASpec,
     "gsm8k": GSM8KSpec,
+    "mbpp": MBPPSpec,
+    "squad": SQuADSpec,
     "sst2": SST2Spec,
 }
 
