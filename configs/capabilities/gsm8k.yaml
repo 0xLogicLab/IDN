@@ -7,7 +7,7 @@ capability:
   train_split: train
   eval_split: test
   eval_limit: 500
-  max_new_tokens: 512
+  max_new_tokens: 1024
   epsilon: 0.02
   target_source: teacher
   prompt:
