@@ -443,21 +443,21 @@ artifacts/packages/{capability}_v1/
 machine-merge), `registry.py`. `idn list-capabilities` works. `pytest` runs (empty-ish).
 *Check: CLI help + list-capabilities print resolved paths.*
 
-[finished] **Phase 1 — capability layer on the cheap task.** Implement `CapabilitySpec` for **sst2**
+[finished] **Phase 1 — capability layer on the cheap task.** Implement `CapabilitySpec` for **gsm8k**
 (easiest) and **cola**, plus `metrics.py` core. Unit-test parse + metric on fixtures.
 *Check: `test_capabilities.py` green; metric on 20 hand-labeled rows is sane.*
 
 [finished] **Phase 2 — models + eval (no training yet).** `models/loader.py` (load base, generate),
-`eval/runner.py`. Run `idn eval` for **base student** and **teacher** on sst2 val (limit 200).
+`eval/runner.py`. Run `idn eval` for **base student** and **teacher** on gsm8k val (limit 200).
 *Check: two eval jsons with believable accuracy; teacher > base.*
 
 **Phase 3 — teacher gen + SFT build + training.** `teacher/generate.py`, `data/build_sft.py`,
 `data/collator.py` (with prompt masking + its unit test), `training/train_lora.py`,
-`models/lora.py` param accounting. Train one sst2 LoRA, eval it.
-*Check: student+LoRA ≥ base student on sst2; trainable% logged; no fp16 used.*
+`models/lora.py` param accounting. Train one gsm8k LoRA, eval it.
+*Check: student+LoRA ≥ base student on gsm8k; trainable% logged; no fp16 used.*
 
 **Phase 4 — frontier sweep + report.** `sweep/run_frontier.py`, `eval/report.py`. Run a small
-grid (r ∈ {8,32}, target ∈ {qv,qkvo}) on sst2.
+grid (r ∈ {8,32}, target ∈ {qv,qkvo}) on gsm8k.
 *Check: markdown table + frontier plot produced; Pareto points marked.*
 
 **Phase 5 — flagship GSM8K.** Implement `gsm8k.py` (CoT target, `####` parsing). Generate
@@ -530,8 +530,8 @@ These are intentionally deferred so V1 delivers the measurable core claim fast.
 
 ## 17. First concrete action for the coding agent
 
-1. Implement Phase 0 + Phase 1 + Phase 2 against **sst2** (cheapest path to a real number).
-2. Run: `idn eval` base student vs teacher on sst2 (limit 200) and confirm the gap is real.
+1. Implement Phase 0 + Phase 1 + Phase 2 against **gsm8k** (cheapest path to a real number).
+2. Run: `idn eval` base student vs teacher on gsm8k (limit 200) and confirm the gap is real.
 3. Only then proceed to training (Phase 3) and the flagship (Phase 5).
 Do not implement all six capabilities up front — get one full vertical slice working end to end,
 then widen.

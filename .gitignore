@@ -4,6 +4,7 @@ info.md
 局部能力提取方案_PPT大纲.md
 *.tex
 .venv/
+.venv_qwen35/
 __pycache__/
 *.py[cod]
 *.egg-info/

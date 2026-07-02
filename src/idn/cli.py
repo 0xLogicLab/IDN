@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -250,7 +251,11 @@ def cmd_eval(args: argparse.Namespace) -> int:
         limit=limit,
         dtype=dtype,
     )
-    if output_path.exists() and not args.override:
+    if (
+        output_path.exists()
+        and not args.override
+        and not is_empty_eval_output(output_path)
+    ):
         if not confirm_overwrite(output_path):
             print("Aborted; output already exists: {0}".format(output_path))
             return 1
@@ -316,6 +321,17 @@ def confirm_overwrite(path: Path) -> bool:
         if answer in ("n", "no"):
             return False
         print("Please answer y or n.")
+
+
+def is_empty_eval_output(path: Path) -> bool:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("completed_examples") == 0
 
 
 def main(argv: List[str] = None) -> int:
