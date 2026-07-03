@@ -1,0 +1,8 @@
+name: h100
+model_dir: /mnt/8T/whl/huggingface/model
+data_dir: /mnt/8T/whl/huggingface/data
+device: cuda
+train_batch_size: 4
+eval_batch_size: 4
+eval_limit: 500
+local_files_only: true

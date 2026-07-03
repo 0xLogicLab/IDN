@@ -3,7 +3,7 @@ capability:
   name: GSM8K arithmetic reasoning
   metric_name: exact_match
   higher_is_better: true
-  dataset_path: /data/huggingface/dataset/gsm8k
+  dataset_path: gsm8k
   train_split: train
   eval_split: test
   eval_limit: 500
@@ -12,4 +12,3 @@ capability:
   target_source: teacher
   prompt:
     template: "Solve the math problem step by step, then finish with #### <answer>."
-

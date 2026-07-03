@@ -11,7 +11,23 @@ import yaml
 
 
 DEFAULT_CAPABILITY_DIR = Path("configs/capabilities")
-DEFAULT_MACHINE_CONFIG = Path("configs/machine/local_3090.yaml")
+DEFAULT_MACHINE = "3090"
+MACHINE_CONFIGS = {
+    "3090": Path("configs/machine/3090.yaml"),
+    "h100": Path("configs/machine/h100.yaml"),
+}
+DEFAULT_MACHINE_CONFIG = MACHINE_CONFIGS[DEFAULT_MACHINE]
+DEFAULT_ARTIFACT_DIR = Path("artifacts")
+MACHINE_FIELDS = {
+    "name",
+    "model_dir",
+    "data_dir",
+    "device",
+    "train_batch_size",
+    "eval_batch_size",
+    "eval_limit",
+    "local_files_only",
+}
 
 
 @dataclass(frozen=True)
@@ -34,14 +50,11 @@ class CapabilityConfig:
 @dataclass(frozen=True)
 class MachineConfig:
     name: str
-    teacher_model_path: str
-    student_model_path: str
-    dtype: str
+    model_dir: str
+    data_dir: str
     device: str
     train_batch_size: int
-    gradient_accumulation_steps: int
     eval_batch_size: int
-    artifact_dir: str
     eval_limit: Optional[int]
     local_files_only: bool
 
@@ -95,13 +108,29 @@ def load_resolved_config(
     """Load capability YAML and merge machine settings over it."""
 
     capability_path = Path(capability_path)
-    machine_path = Path(machine_path) if machine_path is not None else DEFAULT_MACHINE_CONFIG
-    raw = deep_merge(load_yaml(capability_path), load_yaml(machine_path))
+    machine_path = resolve_machine_config_path(machine_path)
+    raw = deep_merge(load_yaml(capability_path), load_machine_yaml(machine_path))
     if overrides:
         raw = deep_merge(raw, overrides)
 
     capability_raw = _required_mapping(raw, "capability", capability_path)
     machine_raw = _required_mapping(raw, "machine", machine_path)
+    _reject_unknown_fields(machine_raw, MACHINE_FIELDS, "machine")
+    machine = MachineConfig(
+        name=_required_str(machine_raw, "name"),
+        model_dir=_required_str(machine_raw, "model_dir"),
+        data_dir=_required_str(machine_raw, "data_dir"),
+        device=_required_str(machine_raw, "device"),
+        train_batch_size=_required_int(machine_raw, "train_batch_size"),
+        eval_batch_size=_required_int(machine_raw, "eval_batch_size"),
+        eval_limit=_optional_int(machine_raw, "eval_limit"),
+        local_files_only=_required_bool(machine_raw, "local_files_only"),
+    )
+    dataset_path = resolve_relative_dir(
+        base_dir=machine.data_dir,
+        relative_dir=_required_str(capability_raw, "dataset_path"),
+        field="capability.dataset_path",
+    )
 
     capability = CapabilityConfig(
         id=_required_str(capability_raw, "id"),
@@ -109,7 +138,7 @@ def load_resolved_config(
         metric_name=_required_str(capability_raw, "metric_name"),
         secondary_metrics=_optional_str_list(capability_raw, "secondary_metrics"),
         higher_is_better=_required_bool(capability_raw, "higher_is_better"),
-        dataset_path=_required_str(capability_raw, "dataset_path"),
+        dataset_path=dataset_path,
         train_split=_required_str(capability_raw, "train_split"),
         eval_split=_required_str(capability_raw, "eval_split"),
         eval_limit=_optional_int(capability_raw, "eval_limit"),
@@ -118,22 +147,33 @@ def load_resolved_config(
         target_source=_required_str(capability_raw, "target_source"),
         prompt_template=_prompt_template(capability_raw),
     )
-    machine = MachineConfig(
-        name=_required_str(machine_raw, "name"),
-        teacher_model_path=_required_str(machine_raw, "teacher_model_path"),
-        student_model_path=_required_str(machine_raw, "student_model_path"),
-        dtype=_validate_dtype(_required_str(machine_raw, "dtype")),
-        device=_required_str(machine_raw, "device"),
-        train_batch_size=_required_int(machine_raw, "train_batch_size"),
-        gradient_accumulation_steps=_required_int(
-            machine_raw, "gradient_accumulation_steps"
-        ),
-        eval_batch_size=_required_int(machine_raw, "eval_batch_size"),
-        artifact_dir=_required_str(machine_raw, "artifact_dir"),
-        eval_limit=_optional_int(machine_raw, "eval_limit"),
-        local_files_only=_required_bool(machine_raw, "local_files_only"),
-    )
     return ResolvedConfig(capability=capability, machine=machine, raw=raw)
+
+
+def load_machine_yaml(path: PathLike) -> Dict[str, Any]:
+    raw = load_yaml(path)
+    if "machine" in raw:
+        machine = _required_mapping(raw, "machine", Path(path))
+        return {"machine": dict(machine)}
+    return {"machine": raw}
+
+
+def resolve_machine_config_path(machine: Optional[PathLike] = None) -> Path:
+    if machine is None:
+        return DEFAULT_MACHINE_CONFIG
+    machine_value = str(machine)
+    if machine_value in MACHINE_CONFIGS:
+        return MACHINE_CONFIGS[machine_value]
+    return Path(machine)
+
+
+def resolve_relative_dir(base_dir: str, relative_dir: str, field: str) -> str:
+    relative_path = Path(relative_dir)
+    if relative_path.is_absolute():
+        raise ConfigError("{0} must be relative, got: {1}".format(field, relative_dir))
+    if ".." in relative_path.parts:
+        raise ConfigError("{0} must not contain '..': {1}".format(field, relative_dir))
+    return str(Path(base_dir) / relative_path)
 
 
 def discover_capability_configs(
@@ -188,6 +228,18 @@ def _optional_str_list(raw: Mapping[str, Any], key: str) -> List[str]:
     return list(value)
 
 
+def _reject_unknown_fields(
+    raw: Mapping[str, Any],
+    allowed: Iterable[str],
+    label: str,
+) -> None:
+    unknown = sorted(set(raw) - set(allowed))
+    if unknown:
+        raise ConfigError(
+            "Unknown {0} field(s): {1}".format(label, ", ".join(unknown))
+        )
+
+
 def _prompt_template(raw: Mapping[str, Any]) -> str:
     prompt = raw.get("prompt")
     if not isinstance(prompt, Mapping):
@@ -196,11 +248,3 @@ def _prompt_template(raw: Mapping[str, Any]) -> str:
     if not isinstance(template, str):
         raise ConfigError("Field must be a string: prompt.template")
     return template
-
-
-def _validate_dtype(dtype: str) -> str:
-    if dtype == "float16" or dtype == "fp16":
-        raise ConfigError("fp16 is forbidden for this project; use bfloat16 or float32")
-    if dtype not in ("bfloat16", "bf16", "float32", "fp32"):
-        raise ConfigError("Unsupported dtype: {0}".format(dtype))
-    return dtype

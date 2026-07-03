@@ -16,9 +16,11 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from idn.config import (
     DEFAULT_CAPABILITY_DIR,
-    DEFAULT_MACHINE_CONFIG,
+    DEFAULT_ARTIFACT_DIR,
+    DEFAULT_MACHINE,
     ConfigError,
     load_resolved_config,
+    resolve_relative_dir,
 )
 from idn.eval.runner import run_eval
 from idn.registry import iter_capabilities, spec_from_config
@@ -28,8 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="idn")
     parser.add_argument(
         "--machine",
-        default=str(DEFAULT_MACHINE_CONFIG),
-        help="Machine YAML merged over capability config.",
+        choices=("3090", "h100"),
+        default=DEFAULT_MACHINE,
+        help="Machine config to use.",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -61,7 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument(
         "--model",
         default=None,
-        help="Model path. Defaults to machine student_model_path.",
+        required=True,
+        help="Model directory relative to machine model_dir.",
     )
     eval_parser.add_argument(
         "--adapter",
@@ -75,8 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_parser.add_argument(
         "--dtype",
-        default=None,
-        help="bfloat16 or float32. Defaults to machine dtype.",
+        default="bfloat16",
+        help="bfloat16 or float32.",
     )
     eval_parser.add_argument(
         "--max-new-tokens",
@@ -151,7 +155,6 @@ def build_parser() -> argparse.ArgumentParser:
         "gen-teacher",
         "build-sft",
         "train-lora",
-        "sweep",
         "export",
         "serve",
         "report",
@@ -166,7 +169,7 @@ def cmd_list_capabilities(args: argparse.Namespace) -> int:
     rows = list(
         iter_capabilities(
             config_dir=Path(args.config_dir),
-            machine_path=Path(args.machine),
+            machine_path=args.machine,
         )
     )
     if not rows:
@@ -175,7 +178,7 @@ def cmd_list_capabilities(args: argparse.Namespace) -> int:
 
     print(
         "{:<14} {:<16} {:<11} {:<42} {:<42}".format(
-            "capability", "metric", "eval_split", "dataset_path", "student_model_path"
+            "capability", "metric", "eval_split", "dataset_path", "model_dir"
         )
     )
     print("-" * 132)
@@ -186,10 +189,10 @@ def cmd_list_capabilities(args: argparse.Namespace) -> int:
                 row.config.metric_name,
                 row.config.eval_split,
                 row.config.dataset_path,
-                row.machine.student_model_path,
+                row.machine.model_dir,
             )
         )
-    print("\nteacher_model_path: {0}".format(rows[0].machine.teacher_model_path))
+    print("\ndata_dir: {0}".format(rows[0].machine.data_dir))
     print("machine: {0}".format(rows[0].machine.name))
     return 0
 
@@ -200,7 +203,7 @@ def cmd_visualize_embeddings(args: argparse.Namespace) -> int:
     split = None if args.split == "configured" else args.split
     result = visualize_dataset_embeddings(
         config_dir=Path(args.config_dir),
-        machine_path=Path(args.machine),
+        machine_path=args.machine,
         split=split,
         samples_per_dataset=args.samples_per_dataset,
         output_dir=Path(args.output_dir),
@@ -231,7 +234,7 @@ def cmd_not_implemented(args: argparse.Namespace) -> int:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
-    resolved = load_resolved_config(Path(args.config), Path(args.machine))
+    resolved = load_resolved_config(Path(args.config), args.machine)
     spec = spec_from_config(resolved.capability)
     if spec is None:
         raise SystemExit(
@@ -239,11 +242,19 @@ def cmd_eval(args: argparse.Namespace) -> int:
         )
 
     split = args.split or resolved.capability.eval_split
-    limit = args.limit if args.limit is not None else resolved.capability.eval_limit
-    model_path = args.model or resolved.machine.student_model_path
-    dtype = args.dtype or resolved.machine.dtype
+    limit = args.limit
+    if limit is None:
+        limit = resolved.machine.eval_limit
+    if limit is None:
+        limit = resolved.capability.eval_limit
+    model_path = resolve_relative_dir(
+        base_dir=resolved.machine.model_dir,
+        relative_dir=args.model,
+        field="--model",
+    )
+    dtype = args.dtype
     output_path = Path(args.output) if args.output else default_eval_output_path(
-        artifact_dir=Path(resolved.machine.artifact_dir),
+        artifact_dir=DEFAULT_ARTIFACT_DIR,
         capability_id=resolved.capability.id,
         split=split,
         model_path=model_path,

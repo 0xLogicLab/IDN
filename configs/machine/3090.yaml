@@ -1,0 +1,8 @@
+name: "3090"
+model_dir: /data/huggingface/model
+data_dir: /data/huggingface/data
+device: cuda
+train_batch_size: 1
+eval_batch_size: 1
+eval_limit: 500
+local_files_only: true

@@ -5,7 +5,7 @@ capability:
   secondary_metrics:
     - f1
   higher_is_better: true
-  dataset_path: /data/huggingface/dataset/squad
+  dataset_path: squad
   train_split: train
   eval_split: validation
   eval_limit: 1000
@@ -14,4 +14,3 @@ capability:
   target_source: gold
   prompt:
     template: "Answer the question using the exact span from the context."
-

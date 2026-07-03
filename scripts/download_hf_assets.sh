@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Edit this path for the machine you are preparing.
-TARGET_ROOT="/mnt/8T/whl/huggingface"
+# TARGET_ROOT="/mnt/8T/whl/huggingface"
+TARGET_ROOT="/data/huggingface"
 
 MODEL_DIR="${TARGET_ROOT}/model"
 DATASET_DIR="${TARGET_ROOT}/dataset"

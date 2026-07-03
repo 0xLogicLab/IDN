@@ -3,7 +3,7 @@ capability:
   name: CNN/DailyMail summarization
   metric_name: rougeL
   higher_is_better: true
-  dataset_path: /data/huggingface/dataset/cnn_dailymail
+  dataset_path: cnn_dailymail
   train_split: train
   eval_split: validation
   eval_limit: 500
@@ -12,4 +12,3 @@ capability:
   target_source: gold
   prompt:
     template: "Summarize the article concisely."
-

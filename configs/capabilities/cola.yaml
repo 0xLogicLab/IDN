@@ -5,7 +5,7 @@ capability:
   secondary_metrics:
     - mcc
   higher_is_better: true
-  dataset_path: /data/huggingface/dataset/glue_cola
+  dataset_path: glue_cola
   train_split: train
   eval_split: validation
   eval_limit: 1000
@@ -14,4 +14,3 @@ capability:
   target_source: gold
   prompt:
     template: "Is this sentence grammatically acceptable? Answer yes or no."
-

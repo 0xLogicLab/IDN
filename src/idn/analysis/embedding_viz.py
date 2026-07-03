@@ -16,6 +16,7 @@ from idn.config import (
     DEFAULT_CAPABILITY_DIR,
     DEFAULT_MACHINE_CONFIG,
     CapabilityConfig,
+    PathLike,
     discover_capability_configs,
     load_resolved_config,
 )
@@ -49,7 +50,7 @@ class RequestSample:
 
 def visualize_dataset_embeddings(
     config_dir: Path = DEFAULT_CAPABILITY_DIR,
-    machine_path: Path = DEFAULT_MACHINE_CONFIG,
+    machine_path: PathLike = DEFAULT_MACHINE_CONFIG,
     split: Optional[str] = "train",
     samples_per_dataset: int = 300,
     output_dir: Path = Path("artifacts/analysis"),
@@ -122,7 +123,7 @@ def visualize_dataset_embeddings(
 
 def collect_request_samples(
     config_dir: Path,
-    machine_path: Path,
+    machine_path: PathLike,
     split: Optional[str],
     samples_per_dataset: int,
     seed: int,

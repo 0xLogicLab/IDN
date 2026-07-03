@@ -18,6 +18,7 @@ from idn.config import (
     DEFAULT_MACHINE_CONFIG,
     CapabilityConfig,
     MachineConfig,
+    PathLike,
     discover_capability_configs,
     load_resolved_config,
 )
@@ -44,7 +45,7 @@ SPEC_FACTORIES: Dict[str, Callable[[CapabilityConfig], CapabilitySpec]] = {
 
 def load_registry(
     config_dir: Path = DEFAULT_CAPABILITY_DIR,
-    machine_path: Path = DEFAULT_MACHINE_CONFIG,
+    machine_path: PathLike = DEFAULT_MACHINE_CONFIG,
 ) -> Dict[str, CapabilityRegistration]:
     registrations = {}
     for config_path in discover_capability_configs(config_dir):
@@ -65,7 +66,7 @@ def load_registry(
 def get_capability(
     capability_id: str,
     config_dir: Path = DEFAULT_CAPABILITY_DIR,
-    machine_path: Path = DEFAULT_MACHINE_CONFIG,
+    machine_path: PathLike = DEFAULT_MACHINE_CONFIG,
 ) -> Optional[CapabilityRegistration]:
     return load_registry(config_dir=config_dir, machine_path=machine_path).get(
         capability_id
@@ -74,7 +75,7 @@ def get_capability(
 
 def iter_capabilities(
     config_dir: Path = DEFAULT_CAPABILITY_DIR,
-    machine_path: Path = DEFAULT_MACHINE_CONFIG,
+    machine_path: PathLike = DEFAULT_MACHINE_CONFIG,
 ) -> Iterable[CapabilityRegistration]:
     return load_registry(config_dir=config_dir, machine_path=machine_path).values()
 
@@ -82,7 +83,7 @@ def iter_capabilities(
 def get_spec(
     capability_id: str,
     config_dir: Path = DEFAULT_CAPABILITY_DIR,
-    machine_path: Path = DEFAULT_MACHINE_CONFIG,
+    machine_path: PathLike = DEFAULT_MACHINE_CONFIG,
 ) -> Optional[CapabilitySpec]:
     registration = get_capability(
         capability_id=capability_id,
