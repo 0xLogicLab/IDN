@@ -1,5 +1,8 @@
 # evaluate a dataset
-PYTHONPATH=src /home/sig/anaconda3/envs/control/bin/python -m idn.cli eval --config configs/capabilities/sst2.yaml --model Qwen2.5-7B-Instruct --verbose
+PYTHONPATH=src .venv_qwen35/bin/python -m idn.cli eval --config configs/capabilities/gsm8k.yaml --model Qwen2.5-1.5B-Instruct --verbose --limit 100
 
 # generate visualization
-PYTHONPATH=src /home/sig/anaconda3/envs/control/bin/python -m idn.cli visualize-embeddings --projection tsne
+PYTHONPATH=src .venv_qwen35/bin/python -m idn.cli visualize-embeddings --projection tsne
+
+# print dataset info
+PYTHONPATH=src .venv_qwen35/bin/python -m idn.cli list_datasets

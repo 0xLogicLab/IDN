@@ -25,7 +25,6 @@ MACHINE_FIELDS = {
     "device",
     "train_batch_size",
     "eval_batch_size",
-    "eval_limit",
     "local_files_only",
 }
 
@@ -55,7 +54,6 @@ class MachineConfig:
     device: str
     train_batch_size: int
     eval_batch_size: int
-    eval_limit: Optional[int]
     local_files_only: bool
 
 
@@ -123,7 +121,6 @@ def load_resolved_config(
         device=_required_str(machine_raw, "device"),
         train_batch_size=_required_int(machine_raw, "train_batch_size"),
         eval_batch_size=_required_int(machine_raw, "eval_batch_size"),
-        eval_limit=_optional_int(machine_raw, "eval_limit"),
         local_files_only=_required_bool(machine_raw, "local_files_only"),
     )
     dataset_path = resolve_relative_dir(

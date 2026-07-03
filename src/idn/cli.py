@@ -48,6 +48,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     list_parser.set_defaults(func=cmd_list_capabilities)
 
+    datasets_parser = subparsers.add_parser(
+        "list_datasets",
+        help="List configured datasets with descriptions and sample counts.",
+    )
+    datasets_parser.add_argument(
+        "--config-dir",
+        default=str(DEFAULT_CAPABILITY_DIR),
+        help="Directory containing capability YAML files.",
+    )
+    datasets_parser.add_argument(
+        "--no-inspect",
+        action="store_true",
+        help="Do not load local datasets; print config and static metadata only.",
+    )
+    datasets_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON instead of text.",
+    )
+    datasets_parser.set_defaults(func=cmd_list_datasets)
+
     eval_parser = subparsers.add_parser("eval", help="Evaluate a base or adapter model.")
     eval_parser.add_argument("--config", required=True, help="Capability YAML.")
     eval_parser.add_argument(
@@ -59,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=int,
         default=None,
-        help="Maximum labeled examples to evaluate.",
+        help="Maximum labeled examples to evaluate. Use 0 for all samples.",
     )
     eval_parser.add_argument(
         "--model",
@@ -197,6 +218,27 @@ def cmd_list_capabilities(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_list_datasets(args: argparse.Namespace) -> int:
+    from idn.data.dataset_info import (
+        collect_dataset_infos,
+        dataset_infos_to_json,
+        format_dataset_infos,
+    )
+
+    rows = list(
+        iter_capabilities(
+            config_dir=Path(args.config_dir),
+            machine_path=args.machine,
+        )
+    )
+    infos = collect_dataset_infos(rows, inspect_local=not args.no_inspect)
+    if args.json:
+        print(dataset_infos_to_json(infos))
+    else:
+        print(format_dataset_infos(infos))
+    return 0
+
+
 def cmd_visualize_embeddings(args: argparse.Namespace) -> int:
     from idn.analysis.embedding_viz import visualize_dataset_embeddings
 
@@ -242,10 +284,11 @@ def cmd_eval(args: argparse.Namespace) -> int:
         )
 
     split = args.split or resolved.capability.eval_split
-    limit = args.limit
-    if limit is None:
-        limit = resolved.machine.eval_limit
-    if limit is None:
+    if args.limit == 0:
+        limit = None
+    elif args.limit is not None:
+        limit = args.limit
+    else:
         limit = resolved.capability.eval_limit
     model_path = resolve_relative_dir(
         base_dir=resolved.machine.model_dir,
