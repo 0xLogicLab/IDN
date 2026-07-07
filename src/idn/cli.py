@@ -19,6 +19,7 @@ from idn.config import (
     DEFAULT_ARTIFACT_DIR,
     DEFAULT_MACHINE,
     ConfigError,
+    load_machine_config,
     load_resolved_config,
     resolve_relative_dir,
 )
@@ -172,6 +173,83 @@ def build_parser() -> argparse.ArgumentParser:
     )
     viz_parser.set_defaults(func=cmd_visualize_embeddings)
 
+    activation_parser = subparsers.add_parser(
+        "visualize-activations",
+        help="Visualize per-layer hidden-unit activations for configured capabilities.",
+    )
+    activation_parser.add_argument(
+        "--config-dir",
+        default=str(DEFAULT_CAPABILITY_DIR),
+        help="Directory containing capability YAML files.",
+    )
+    activation_parser.add_argument(
+        "--model",
+        required=True,
+        help="Model directory relative to machine model_dir.",
+    )
+    activation_parser.add_argument(
+        "--adapter",
+        default=None,
+        help="Optional LoRA adapter path.",
+    )
+    activation_parser.add_argument(
+        "--capabilities",
+        default=None,
+        help="Optional comma-separated capability ids such as gsm8k,mbpp,cnn_dailymail.",
+    )
+    activation_parser.add_argument(
+        "--split",
+        default="train",
+        help="Dataset split to sample. Use 'configured' for each capability train_split.",
+    )
+    activation_parser.add_argument(
+        "--samples-per-capability",
+        type=int,
+        default=10,
+        help="Maximum request samples per capability.",
+    )
+    activation_parser.add_argument(
+        "--seed",
+        type=int,
+        default=13,
+        help="Sampling seed.",
+    )
+    activation_parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=2000,
+        help="Maximum request text characters per sample before tokenization.",
+    )
+    activation_parser.add_argument(
+        "--output-dir",
+        default=str(DEFAULT_ARTIFACT_DIR / "analysis"),
+        help="Directory for HTML, JSON, and CSV activation outputs.",
+    )
+    activation_parser.add_argument(
+        "--dtype",
+        default="bfloat16",
+        help="bfloat16 or float32.",
+    )
+    activation_parser.add_argument(
+        "--max-length",
+        type=int,
+        default=1024,
+        help="Maximum prompt tokens before truncation. Use 0 to disable.",
+    )
+    activation_parser.add_argument(
+        "--neuron-buckets",
+        type=int,
+        default=96,
+        help="Number of contiguous hidden-unit buckets shown in the layer heatmap.",
+    )
+    activation_parser.add_argument(
+        "--top-k",
+        type=int,
+        default=20,
+        help="Number of capability-contrasting hidden units listed per capability.",
+    )
+    activation_parser.set_defaults(func=cmd_visualize_activations)
+
     for name in (
         "gen-teacher",
         "build-sft",
@@ -266,6 +344,51 @@ def cmd_visualize_embeddings(args: argparse.Namespace) -> int:
     print("plot: {0}".format(result["outputs"]["plot"]))
     print("coordinates: {0}".format(result["outputs"]["csv"]))
     print("diagnostics: {0}".format(result["outputs"]["json"]))
+    return 0
+
+
+def cmd_visualize_activations(args: argparse.Namespace) -> int:
+    from idn.analysis.activation_viz import visualize_model_activations
+
+    machine = load_machine_config(args.machine)
+    model_path = resolve_relative_dir(
+        base_dir=machine.model_dir,
+        relative_dir=args.model,
+        field="--model",
+    )
+    capabilities = (
+        [item.strip() for item in args.capabilities.split(",") if item.strip()]
+        if args.capabilities
+        else None
+    )
+    split = None if args.split == "configured" else args.split
+    result = visualize_model_activations(
+        model_path=model_path,
+        config_dir=Path(args.config_dir),
+        machine_path=args.machine,
+        adapter_path=args.adapter,
+        dtype=args.dtype,
+        device=machine.device,
+        local_files_only=machine.local_files_only,
+        capabilities=capabilities,
+        split=split,
+        samples_per_capability=args.samples_per_capability,
+        seed=args.seed,
+        max_chars=args.max_chars,
+        output_dir=Path(args.output_dir),
+        max_length=args.max_length,
+        neuron_buckets=args.neuron_buckets,
+        top_k=args.top_k,
+    )
+    print("Activation visualization complete.")
+    print("model: {0}".format(result["model_path"]))
+    print("capabilities: {0}".format(result["num_capabilities"]))
+    print("prompts: {0}".format(result["num_prompts"]))
+    print("layers: {0}".format(result["num_layers"]))
+    print("hidden_size: {0}".format(result["hidden_size"]))
+    print("html: {0}".format(result["outputs"]["html"]))
+    print("json: {0}".format(result["outputs"]["json"]))
+    print("top_neurons_csv: {0}".format(result["outputs"]["top_neurons_csv"]))
     return 0
 
 

@@ -6,3 +6,6 @@ PYTHONPATH=src .venv_qwen35/bin/python -m idn.cli visualize-embeddings --project
 
 # print dataset info
 PYTHONPATH=src .venv_qwen35/bin/python -m idn.cli list_datasets
+
+# visualize activations
+PYTHONPATH=src .venv_qwen35/bin/python -m idn.cli --machine 3090 visualize-activations --model Qwen2.5-1.5B-Instruct --capabilities sst2,cola

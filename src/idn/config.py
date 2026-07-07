@@ -113,16 +113,7 @@ def load_resolved_config(
 
     capability_raw = _required_mapping(raw, "capability", capability_path)
     machine_raw = _required_mapping(raw, "machine", machine_path)
-    _reject_unknown_fields(machine_raw, MACHINE_FIELDS, "machine")
-    machine = MachineConfig(
-        name=_required_str(machine_raw, "name"),
-        model_dir=_required_str(machine_raw, "model_dir"),
-        data_dir=_required_str(machine_raw, "data_dir"),
-        device=_required_str(machine_raw, "device"),
-        train_batch_size=_required_int(machine_raw, "train_batch_size"),
-        eval_batch_size=_required_int(machine_raw, "eval_batch_size"),
-        local_files_only=_required_bool(machine_raw, "local_files_only"),
-    )
+    machine = _machine_config_from_raw(machine_raw)
     dataset_path = resolve_relative_dir(
         base_dir=machine.data_dir,
         relative_dir=_required_str(capability_raw, "dataset_path"),
@@ -153,6 +144,15 @@ def load_machine_yaml(path: PathLike) -> Dict[str, Any]:
         machine = _required_mapping(raw, "machine", Path(path))
         return {"machine": dict(machine)}
     return {"machine": raw}
+
+
+def load_machine_config(machine: Optional[PathLike] = None) -> MachineConfig:
+    """Load and validate a machine config without requiring a capability config."""
+
+    machine_path = resolve_machine_config_path(machine)
+    raw = load_machine_yaml(machine_path)
+    machine_raw = _required_mapping(raw, "machine", machine_path)
+    return _machine_config_from_raw(machine_raw)
 
 
 def resolve_machine_config_path(machine: Optional[PathLike] = None) -> Path:
@@ -216,6 +216,19 @@ def _required_bool(raw: Mapping[str, Any], key: str) -> bool:
     if not isinstance(value, bool):
         raise ConfigError("Missing boolean field: {0}".format(key))
     return value
+
+
+def _machine_config_from_raw(raw: Mapping[str, Any]) -> MachineConfig:
+    _reject_unknown_fields(raw, MACHINE_FIELDS, "machine")
+    return MachineConfig(
+        name=_required_str(raw, "name"),
+        model_dir=_required_str(raw, "model_dir"),
+        data_dir=_required_str(raw, "data_dir"),
+        device=_required_str(raw, "device"),
+        train_batch_size=_required_int(raw, "train_batch_size"),
+        eval_batch_size=_required_int(raw, "eval_batch_size"),
+        local_files_only=_required_bool(raw, "local_files_only"),
+    )
 
 
 def _optional_str_list(raw: Mapping[str, Any], key: str) -> List[str]:

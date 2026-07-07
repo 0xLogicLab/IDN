@@ -12,3 +12,4 @@ artifacts/eval/*.jsonl
 artifacts/eval/*.json
 tests/
 artifacts/
+build/
