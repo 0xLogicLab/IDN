@@ -23,8 +23,12 @@ MACHINE_FIELDS = {
     "model_dir",
     "data_dir",
     "device",
+    "dtype",
     "train_batch_size",
+    "gradient_accumulation_steps",
     "eval_batch_size",
+    "artifact_dir",
+    "eval_limit",
     "local_files_only",
 }
 
@@ -220,6 +224,7 @@ def _required_bool(raw: Mapping[str, Any], key: str) -> bool:
 
 def _machine_config_from_raw(raw: Mapping[str, Any]) -> MachineConfig:
     _reject_unknown_fields(raw, MACHINE_FIELDS, "machine")
+    _reject_fp16(raw)
     return MachineConfig(
         name=_required_str(raw, "name"),
         model_dir=_required_str(raw, "model_dir"),
@@ -248,6 +253,12 @@ def _reject_unknown_fields(
         raise ConfigError(
             "Unknown {0} field(s): {1}".format(label, ", ".join(unknown))
         )
+
+
+def _reject_fp16(raw: Mapping[str, Any]) -> None:
+    dtype = raw.get("dtype")
+    if dtype in ("fp16", "float16"):
+        raise ConfigError("fp16 is forbidden; use bfloat16 or float32")
 
 
 def _prompt_template(raw: Mapping[str, Any]) -> str:

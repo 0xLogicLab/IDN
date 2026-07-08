@@ -23,6 +23,7 @@ from idn.config import (
     load_resolved_config,
     resolve_relative_dir,
 )
+from idn.extraction.carve import CarveError, carve_qwen2_full_keep, validate_keep_ratio
 from idn.eval.runner import run_eval
 from idn.registry import iter_capabilities, spec_from_config
 
@@ -31,9 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="idn")
     parser.add_argument(
         "--machine",
-        choices=("3090", "h100"),
         default=DEFAULT_MACHINE,
-        help="Machine config to use.",
+        help="Machine config to use: 3090, h100, or a YAML path.",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -87,7 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         default=None,
         required=True,
-        help="Model directory relative to machine model_dir.",
+        help="Model directory relative to --model-dir or machine model_dir.",
+    )
+    eval_parser.add_argument(
+        "--model-dir",
+        default=None,
+        help="Override the machine config model_dir used to resolve --model.",
     )
     eval_parser.add_argument(
         "--adapter",
@@ -250,6 +255,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     activation_parser.set_defaults(func=cmd_visualize_activations)
 
+    carve_parser = subparsers.add_parser(
+        "carve",
+        help="Create a carved model artifact from a local HF checkpoint.",
+    )
+    carve_parser.add_argument(
+        "--model",
+        required=True,
+        help="Model directory relative to machine model_dir.",
+    )
+    carve_parser.add_argument(
+        "--keep-ratio",
+        type=float,
+        default=1.0,
+        help="Fraction of units to keep. Only 1.0 is implemented in Phase 1.",
+    )
+    carve_parser.add_argument(
+        "--scores",
+        default=None,
+        help="Optional locate scores path recorded in the manifest.",
+    )
+    carve_parser.add_argument(
+        "--output",
+        default=None,
+        help="Output artifact directory. Defaults to artifacts/carving/{model}/carve_r{keep_ratio}.",
+    )
+    carve_parser.add_argument(
+        "--override",
+        action="store_true",
+        help="Replace an existing output artifact directory.",
+    )
+    carve_parser.set_defaults(func=cmd_carve)
+
     for name in (
         "gen-teacher",
         "build-sft",
@@ -398,6 +435,40 @@ def cmd_not_implemented(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_carve(args: argparse.Namespace) -> int:
+    machine = load_machine_config(args.machine)
+    model_path = Path(
+        resolve_relative_dir(
+            base_dir=machine.model_dir,
+            relative_dir=args.model,
+            field="--model",
+        )
+    )
+    keep_ratio = validate_keep_ratio(args.keep_ratio)
+    output_path = Path(args.output) if args.output else default_carve_output_path(
+        artifact_dir=DEFAULT_ARTIFACT_DIR,
+        model_path=model_path,
+        keep_ratio=keep_ratio,
+    )
+    if keep_ratio == 1.0:
+        print("Starting carve.")
+        print("model: {0}".format(model_path))
+        print("output: {0}".format(output_path))
+        print("keep_ratio: {0}".format(keep_ratio))
+        manifest = carve_qwen2_full_keep(
+            model_path=model_path,
+            output_dir=output_path,
+            scores_path=Path(args.scores) if args.scores else None,
+            override=args.override,
+            progress=print_progress,
+        )
+        print("Carve artifact created.")
+        print("teacher_hash: {0}".format(manifest.teacher_hash))
+        print("units: {0}".format(manifest.num_units))
+        return 0
+    raise CarveError("Unsupported keep_ratio: {0}".format(keep_ratio))
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     resolved = load_resolved_config(Path(args.config), args.machine)
     spec = spec_from_config(resolved.capability)
@@ -413,8 +484,9 @@ def cmd_eval(args: argparse.Namespace) -> int:
         limit = args.limit
     else:
         limit = resolved.capability.eval_limit
+    model_base_dir = args.model_dir or resolved.machine.model_dir
     model_path = resolve_relative_dir(
-        base_dir=resolved.machine.model_dir,
+        base_dir=model_base_dir,
         relative_dir=args.model,
         field="--model",
     )
@@ -477,6 +549,27 @@ def default_eval_output_path(
     return artifact_dir / "eval" / filename
 
 
+def default_carve_output_path(
+    artifact_dir: Path,
+    model_path: Path,
+    keep_ratio: float,
+) -> Path:
+    model_name = safe_slug(Path(model_path).name or str(model_path))
+    ratio_name = format_keep_ratio(keep_ratio)
+    return artifact_dir / "carving" / model_name / "carve_r{0}".format(ratio_name)
+
+
+def format_keep_ratio(keep_ratio: float) -> str:
+    ratio = "{0:.6f}".format(float(keep_ratio)).rstrip("0").rstrip(".")
+    if "." not in ratio:
+        ratio = "{0}.0".format(ratio)
+    return ratio
+
+
+def print_progress(message: str) -> None:
+    print("[carve] {0}".format(message), flush=True)
+
+
 def safe_slug(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
     slug = slug.strip("-._")
@@ -519,6 +612,9 @@ def main(argv: List[str] = None) -> int:
         return int(func(args))
     except ConfigError as exc:
         print("config error: {0}".format(exc), file=sys.stderr)
+        return 2
+    except CarveError as exc:
+        print("carve error: {0}".format(exc), file=sys.stderr)
         return 2
 
 
