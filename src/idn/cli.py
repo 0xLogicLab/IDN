@@ -23,7 +23,7 @@ from idn.config import (
     load_resolved_config,
     resolve_relative_dir,
 )
-from idn.extraction.carve import CarveError, carve_qwen2_full_keep, validate_keep_ratio
+from idn.extraction.carve import CarveError, carve_qwen2_homogeneous, validate_keep_ratio
 from idn.eval.runner import run_eval
 from idn.registry import iter_capabilities, spec_from_config
 
@@ -268,7 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep-ratio",
         type=float,
         default=1.0,
-        help="Fraction of units to keep. Only 1.0 is implemented in Phase 1.",
+        help="Fraction of units to keep.",
     )
     carve_parser.add_argument(
         "--scores",
@@ -450,23 +450,22 @@ def cmd_carve(args: argparse.Namespace) -> int:
         model_path=model_path,
         keep_ratio=keep_ratio,
     )
-    if keep_ratio == 1.0:
-        print("Starting carve.")
-        print("model: {0}".format(model_path))
-        print("output: {0}".format(output_path))
-        print("keep_ratio: {0}".format(keep_ratio))
-        manifest = carve_qwen2_full_keep(
-            model_path=model_path,
-            output_dir=output_path,
-            scores_path=Path(args.scores) if args.scores else None,
-            override=args.override,
-            progress=print_progress,
-        )
-        print("Carve artifact created.")
-        print("teacher_hash: {0}".format(manifest.teacher_hash))
-        print("units: {0}".format(manifest.num_units))
-        return 0
-    raise CarveError("Unsupported keep_ratio: {0}".format(keep_ratio))
+    print("Starting carve.")
+    print("model: {0}".format(model_path))
+    print("output: {0}".format(output_path))
+    print("keep_ratio: {0}".format(keep_ratio))
+    manifest = carve_qwen2_homogeneous(
+        model_path=model_path,
+        output_dir=output_path,
+        keep_ratio=keep_ratio,
+        scores_path=Path(args.scores) if args.scores else None,
+        override=args.override,
+        progress=print_progress,
+    )
+    print("Carve artifact created.")
+    print("teacher_hash: {0}".format(manifest.teacher_hash))
+    print("units: {0}".format(manifest.num_units))
+    return 0
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
