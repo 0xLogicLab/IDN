@@ -110,6 +110,7 @@ class Qwen2Config(PretrainedConfig):
         sliding_window=4096,
         max_window_layers=28,
         attention_dropout=0.0,
+        idn_carve=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -133,8 +134,38 @@ class Qwen2Config(PretrainedConfig):
         self.use_cache = use_cache
         self.rope_theta = rope_theta
         self.attention_dropout = attention_dropout
+        self.idn_carve = self._validate_idn_carve(idn_carve)
 
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
+    @staticmethod
+    def _validate_idn_carve(idn_carve):
+        if idn_carve is None:
+            return None
+        if not isinstance(idn_carve, dict):
+            raise ValueError("idn_carve must be a mapping")
+        mode = idn_carve.get("mode")
+        if mode not in ("homogeneous", "heterogeneous"):
+            raise ValueError("idn_carve.mode must be homogeneous or heterogeneous")
+        version = idn_carve.get("version")
+        if version != 1:
+            raise ValueError("idn_carve.version must be 1")
+        if mode == "homogeneous":
+            required = (
+                "source_dimensions",
+                "kept_query_heads",
+                "kept_kv_groups",
+                "kept_ffn_channels",
+                "kept_hidden_indices",
+            )
+            missing = [key for key in required if key not in idn_carve]
+            if missing:
+                raise ValueError(
+                    "idn_carve missing required field(s): {0}".format(
+                        ", ".join(missing)
+                    )
+                )
+        return dict(idn_carve)

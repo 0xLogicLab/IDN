@@ -423,6 +423,23 @@ def build_carved_qwen2_config(
     carved["num_attention_heads"] = len(keep_set.query_heads)
     carved["num_key_value_heads"] = len(keep_set.kv_groups)
     carved["architectures"] = ["Qwen2ForCausalLM"]
+    carved["idn_carve"] = {
+        "version": 1,
+        "mode": "homogeneous",
+        "source_dimensions": {
+            "num_layers": dims.num_layers,
+            "hidden_size": dims.hidden_size,
+            "intermediate_size": dims.intermediate_size,
+            "num_attention_heads": dims.num_attention_heads,
+            "num_key_value_heads": dims.num_key_value_heads,
+            "head_dim": dims.head_dim,
+            "query_heads_per_kv": dims.query_heads_per_kv,
+        },
+        "kept_query_heads": list(keep_set.query_heads),
+        "kept_kv_groups": list(keep_set.kv_groups),
+        "kept_ffn_channels": list(keep_set.ffn_channels),
+        "kept_hidden_indices": list(keep_set.hidden_indices),
+    }
     if carved["hidden_size"] != carved["num_attention_heads"] * dims.head_dim:
         raise CarveError(
             "Internal carve error: hidden_size does not match kept query heads"
