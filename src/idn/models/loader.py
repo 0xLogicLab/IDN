@@ -37,6 +37,16 @@ def torch_dtype(dtype: str):
     return torch.bfloat16 if dtype == "bfloat16" else torch.float32
 
 
+def load_local_qwen2_for_causal_lm(model_path: str, **kwargs):
+    """Load Qwen2 through IDN's local editable backend."""
+
+    try:
+        from idn.models.qwen2_local.loader import load_qwen2_for_causal_lm
+    except ImportError as exc:
+        raise ModelLoadError("local Qwen2 backend is unavailable") from exc
+    return load_qwen2_for_causal_lm(model_path, **kwargs)
+
+
 @dataclass
 class ChatModel:
     model_path: str
@@ -134,7 +144,10 @@ class ChatModel:
             if tokenizer.pad_token_id is None:
                 tokenizer.pad_token = tokenizer.eos_token
             tokenizer.padding_side = "left"
-            model = AutoModelForCausalLM.from_pretrained(self.model_path, **kwargs)
+            if model_type == "qwen2":
+                model = load_local_qwen2_for_causal_lm(self.model_path, **kwargs)
+            else:
+                model = AutoModelForCausalLM.from_pretrained(self.model_path, **kwargs)
             self.tokenizer = tokenizer
 
         if self.adapter_path:
