@@ -24,6 +24,7 @@ from idn.config import (
     resolve_relative_dir,
 )
 from idn.extraction.carve import CarveError, carve_qwen2_homogeneous, validate_keep_ratio
+from idn.extraction.locate import LocateError, locate_qwen2_units
 from idn.eval.runner import run_eval
 from idn.registry import iter_capabilities, spec_from_config
 
@@ -255,6 +256,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
     activation_parser.set_defaults(func=cmd_visualize_activations)
 
+    locate_parser = subparsers.add_parser(
+        "locate",
+        help="Score Qwen2 prunable units for a capability.",
+    )
+    locate_parser.add_argument("--config", required=True, help="Capability YAML.")
+    locate_parser.add_argument(
+        "--split",
+        default=None,
+        help="Dataset split to score. Defaults to capability train_split.",
+    )
+    locate_parser.add_argument(
+        "--num-examples",
+        type=int,
+        default=32,
+        help="Number of examples to score.",
+    )
+    locate_parser.add_argument(
+        "--model",
+        required=True,
+        help="Model directory relative to --model-dir or machine model_dir.",
+    )
+    locate_parser.add_argument(
+        "--model-dir",
+        default=None,
+        help="Override the machine config model_dir used to resolve --model.",
+    )
+    locate_parser.add_argument(
+        "--output",
+        default=None,
+        help=(
+            "Output directory for scores.json and report.json. Defaults to "
+            "artifacts/locate/{capability}/{split}_{model}_n{num_examples}_{dtype}."
+        ),
+    )
+    locate_parser.add_argument(
+        "--dtype",
+        default="bfloat16",
+        help="bfloat16 or float32.",
+    )
+    locate_parser.add_argument(
+        "--max-length",
+        type=int,
+        default=512,
+        help="Maximum prompt+target tokens before truncation.",
+    )
+    locate_parser.set_defaults(func=cmd_locate)
+
     carve_parser = subparsers.add_parser(
         "carve",
         help="Create a carved model artifact from a local HF checkpoint.",
@@ -273,7 +321,7 @@ def build_parser() -> argparse.ArgumentParser:
     carve_parser.add_argument(
         "--scores",
         default=None,
-        help="Optional locate scores path recorded in the manifest.",
+        help="Optional locate scores path used to select units.",
     )
     carve_parser.add_argument(
         "--output",
@@ -435,6 +483,55 @@ def cmd_not_implemented(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_locate(args: argparse.Namespace) -> int:
+    resolved = load_resolved_config(Path(args.config), args.machine)
+    spec = spec_from_config(resolved.capability)
+    if spec is None:
+        raise SystemExit(
+            "Capability '{0}' is not implemented yet.".format(resolved.capability.id)
+        )
+    model_base_dir = args.model_dir or resolved.machine.model_dir
+    model_path = Path(
+        resolve_relative_dir(
+            base_dir=model_base_dir,
+            relative_dir=args.model,
+            field="--model",
+        )
+    )
+    split = args.split or resolved.capability.train_split
+    output_path = Path(args.output) if args.output else default_locate_output_path(
+        artifact_dir=DEFAULT_ARTIFACT_DIR,
+        capability_id=resolved.capability.id,
+        split=split,
+        model_path=model_path,
+        num_examples=args.num_examples,
+        dtype=args.dtype,
+    )
+    print("Starting locate.")
+    print("capability: {0}".format(resolved.capability.id))
+    print("split: {0}".format(split))
+    print("examples: {0}".format(args.num_examples))
+    print("model: {0}".format(model_path))
+    print("output: {0}".format(output_path))
+    result = locate_qwen2_units(
+        model_path=model_path,
+        spec=spec,
+        split=split,
+        limit=args.num_examples,
+        output_dir=output_path,
+        dtype=args.dtype,
+        device=resolved.machine.device,
+        local_files_only=resolved.machine.local_files_only,
+        max_length=args.max_length,
+        progress=print_locate_progress,
+    )
+    print("Locate complete.")
+    print("scores: {0}".format(len(result.scores)))
+    print("scores_json: {0}".format(output_path / "scores.json"))
+    print("report_json: {0}".format(output_path / "report.json"))
+    return 0
+
+
 def cmd_carve(args: argparse.Namespace) -> int:
     machine = load_machine_config(args.machine)
     model_path = Path(
@@ -558,6 +655,24 @@ def default_carve_output_path(
     return artifact_dir / "carving" / model_name / "carve_r{0}".format(ratio_name)
 
 
+def default_locate_output_path(
+    artifact_dir: Path,
+    capability_id: str,
+    split: str,
+    model_path: Path,
+    num_examples: int,
+    dtype: str,
+) -> Path:
+    model_name = safe_slug(Path(model_path).name or str(model_path))
+    dirname = "{split}_{model}_n{num_examples}_{dtype}".format(
+        split=safe_slug(split),
+        model=model_name,
+        num_examples=num_examples,
+        dtype=safe_slug(dtype),
+    )
+    return artifact_dir / "locate" / safe_slug(capability_id) / dirname
+
+
 def format_keep_ratio(keep_ratio: float) -> str:
     ratio = "{0:.6f}".format(float(keep_ratio)).rstrip("0").rstrip(".")
     if "." not in ratio:
@@ -567,6 +682,10 @@ def format_keep_ratio(keep_ratio: float) -> str:
 
 def print_progress(message: str) -> None:
     print("[carve] {0}".format(message), flush=True)
+
+
+def print_locate_progress(message: str) -> None:
+    print("[locate] {0}".format(message), flush=True)
 
 
 def safe_slug(value: str) -> str:
@@ -614,6 +733,9 @@ def main(argv: List[str] = None) -> int:
         return 2
     except CarveError as exc:
         print("carve error: {0}".format(exc), file=sys.stderr)
+        return 2
+    except LocateError as exc:
+        print("locate error: {0}".format(exc), file=sys.stderr)
         return 2
 
 
