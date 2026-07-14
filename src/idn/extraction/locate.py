@@ -266,7 +266,7 @@ def load_model(
         if resolved_dtype == torch.bfloat16:
             kwargs["torch_dtype"] = torch.float32
     model = load_qwen2_for_causal_lm(str(model_path), **kwargs)
-    model.train()
+    model.eval()
     model.config.use_cache = False
     return model
 

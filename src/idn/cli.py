@@ -316,7 +316,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep-ratio",
         type=float,
         default=1.0,
-        help="Fraction of units to keep.",
+        help="Fraction of FFN channels to keep; attention defaults to full keep.",
+    )
+    carve_parser.add_argument(
+        "--attention-keep-ratio",
+        type=float,
+        default=None,
+        help="Optional attention-head keep ratio. Defaults to 1.0.",
+    )
+    carve_parser.add_argument(
+        "--ffn-keep-ratio",
+        type=float,
+        default=None,
+        help="Optional FFN-channel keep ratio overriding --keep-ratio.",
     )
     carve_parser.add_argument(
         "--scores",
@@ -542,19 +554,43 @@ def cmd_carve(args: argparse.Namespace) -> int:
         )
     )
     keep_ratio = validate_keep_ratio(args.keep_ratio)
+    attention_keep_ratio = (
+        validate_keep_ratio(args.attention_keep_ratio)
+        if args.attention_keep_ratio is not None
+        else None
+    )
+    ffn_keep_ratio = (
+        validate_keep_ratio(args.ffn_keep_ratio)
+        if args.ffn_keep_ratio is not None
+        else None
+    )
     output_path = Path(args.output) if args.output else default_carve_output_path(
         artifact_dir=DEFAULT_ARTIFACT_DIR,
         model_path=model_path,
         keep_ratio=keep_ratio,
+        attention_keep_ratio=attention_keep_ratio,
+        ffn_keep_ratio=ffn_keep_ratio,
     )
     print("Starting carve.")
     print("model: {0}".format(model_path))
     print("output: {0}".format(output_path))
     print("keep_ratio: {0}".format(keep_ratio))
+    print(
+        "attention_keep_ratio: {0}".format(
+            attention_keep_ratio if attention_keep_ratio is not None else 1.0
+        )
+    )
+    print(
+        "ffn_keep_ratio: {0}".format(
+            ffn_keep_ratio if ffn_keep_ratio is not None else keep_ratio
+        )
+    )
     manifest = carve_qwen2_homogeneous(
         model_path=model_path,
         output_dir=output_path,
         keep_ratio=keep_ratio,
+        attention_keep_ratio=attention_keep_ratio,
+        ffn_keep_ratio=ffn_keep_ratio,
         scores_path=Path(args.scores) if args.scores else None,
         override=args.override,
         progress=print_progress,
@@ -649,10 +685,21 @@ def default_carve_output_path(
     artifact_dir: Path,
     model_path: Path,
     keep_ratio: float,
+    attention_keep_ratio: Optional[float] = None,
+    ffn_keep_ratio: Optional[float] = None,
 ) -> Path:
     model_name = safe_slug(Path(model_path).name or str(model_path))
     ratio_name = format_keep_ratio(keep_ratio)
-    return artifact_dir / "carving" / model_name / "carve_r{0}".format(ratio_name)
+    dirname = "carve_r{0}".format(ratio_name)
+    if attention_keep_ratio is not None or ffn_keep_ratio is not None:
+        attention_name = format_keep_ratio(
+            1.0 if attention_keep_ratio is None else attention_keep_ratio
+        )
+        ffn_name = format_keep_ratio(
+            keep_ratio if ffn_keep_ratio is None else ffn_keep_ratio
+        )
+        dirname += "_attn{0}_ffn{1}".format(attention_name, ffn_name)
+    return artifact_dir / "carving" / model_name / dirname
 
 
 def default_locate_output_path(

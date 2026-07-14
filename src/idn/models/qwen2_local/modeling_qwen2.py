@@ -200,7 +200,15 @@ class Qwen2Attention(nn.Module):
 
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.head_dim = self.hidden_size // self.num_heads
+        carve_metadata = getattr(config, "idn_carve", None) or {}
+        source_dimensions = carve_metadata.get("source_dimensions", {})
+        configured_head_dim = getattr(config, "head_dim", None)
+        if configured_head_dim is None:
+            configured_head_dim = source_dimensions.get("head_dim")
+        if configured_head_dim is None:
+            configured_head_dim = self.hidden_size // self.num_heads
+        self.head_dim = int(configured_head_dim)
+        self.attention_hidden_size = self.num_heads * self.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
@@ -208,10 +216,11 @@ class Qwen2Attention(nn.Module):
         self.is_causal = True
         self.attention_dropout = config.attention_dropout
 
-        if (self.head_dim * self.num_heads) != self.hidden_size:
+        if not carve_metadata and self.attention_hidden_size != self.hidden_size:
             raise ValueError(
-                f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
-                f" and `num_heads`: {self.num_heads})."
+                f"head_dim * num_heads must equal hidden_size for an uncarved model "
+                f"(got `head_dim`: {self.head_dim}, `num_heads`: {self.num_heads}, "
+                f"and `hidden_size`: {self.hidden_size})."
             )
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=True)
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
@@ -288,7 +297,7 @@ class Qwen2Attention(nn.Module):
             )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.reshape(bsz, q_len, self.attention_hidden_size)
 
         attn_output = self.o_proj(attn_output)
 
@@ -435,7 +444,9 @@ class Qwen2FlashAttention2(Qwen2Attention):
             use_top_left_mask=self._flash_attn_uses_top_left_mask,
         )
 
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
+        attn_output = attn_output.reshape(
+            bsz, q_len, self.attention_hidden_size
+        ).contiguous()
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
@@ -528,7 +539,7 @@ class Qwen2SdpaAttention(Qwen2Attention):
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.view(bsz, q_len, self.attention_hidden_size)
 
         attn_output = self.o_proj(attn_output)
 

@@ -99,6 +99,7 @@ class Qwen2Config(PretrainedConfig):
         num_hidden_layers=32,
         num_attention_heads=32,
         num_key_value_heads=32,
+        head_dim=None,
         hidden_act="silu",
         max_position_embeddings=32768,
         initializer_range=0.02,
@@ -128,6 +129,7 @@ class Qwen2Config(PretrainedConfig):
             num_key_value_heads = num_attention_heads
 
         self.num_key_value_heads = num_key_value_heads
+        self.head_dim = head_dim
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
@@ -151,16 +153,24 @@ class Qwen2Config(PretrainedConfig):
         if mode not in ("homogeneous", "heterogeneous"):
             raise ValueError("idn_carve.mode must be homogeneous or heterogeneous")
         version = idn_carve.get("version")
-        if version != 1:
-            raise ValueError("idn_carve.version must be 1")
+        if version not in (1, 2):
+            raise ValueError("idn_carve.version must be 1 or 2")
         if mode == "homogeneous":
-            required = (
-                "source_dimensions",
-                "kept_query_heads",
-                "kept_kv_groups",
-                "kept_ffn_channels",
-                "kept_hidden_indices",
-            )
+            if version == 1:
+                required = (
+                    "source_dimensions",
+                    "kept_query_heads",
+                    "kept_kv_groups",
+                    "kept_ffn_channels",
+                    "kept_hidden_indices",
+                )
+            else:
+                required = (
+                    "source_dimensions",
+                    "kept_query_heads_by_layer",
+                    "kept_kv_groups_by_layer",
+                    "kept_ffn_channels_by_layer",
+                )
             missing = [key for key in required if key not in idn_carve]
             if missing:
                 raise ValueError(

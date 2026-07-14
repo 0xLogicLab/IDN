@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 
 QUERY_HEAD = "query_head"
@@ -78,7 +78,12 @@ def qwen2_dimensions(config: Any) -> Qwen2Dimensions:
     intermediate_size = _required_positive_int(config, "intermediate_size")
     num_heads = _required_positive_int(config, "num_attention_heads")
     num_kv_heads = _required_positive_int(config, "num_key_value_heads")
+    carve_metadata = _config_value(config, "idn_carve", None)
     head_dim = _config_value(config, "head_dim", None)
+    if head_dim is None and isinstance(carve_metadata, Mapping):
+        source_dimensions = carve_metadata.get("source_dimensions", {})
+        if isinstance(source_dimensions, Mapping):
+            head_dim = source_dimensions.get("head_dim")
     if head_dim is None:
         if hidden_size % num_heads != 0:
             raise ValueError("hidden_size must be divisible by num_attention_heads")
@@ -87,7 +92,7 @@ def qwen2_dimensions(config: Any) -> Qwen2Dimensions:
         head_dim = int(head_dim)
         if head_dim <= 0:
             raise ValueError("head_dim must be positive")
-        if head_dim * num_heads != hidden_size:
+        if carve_metadata is None and head_dim * num_heads != hidden_size:
             raise ValueError("head_dim * num_attention_heads must equal hidden_size")
 
     if num_heads % num_kv_heads != 0:
@@ -243,4 +248,3 @@ def _required_positive_int(config: Any, key: str) -> int:
 def _validate_index(index: int, size: int, label: str) -> None:
     if not isinstance(index, int) or index < 0 or index >= size:
         raise ValueError("{0} index out of range: {1}".format(label, index))
-

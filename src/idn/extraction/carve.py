@@ -55,6 +55,7 @@ class CarveManifest:
     kept_units: Mapping[str, List[str]]
     dimensions: Mapping[str, int]
     scores_path: Optional[str] = None
+    unit_keep_ratios: Optional[Mapping[str, float]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -70,6 +71,8 @@ class CarveManifest:
         }
         if self.scores_path is not None:
             payload["scores_path"] = self.scores_path
+        if self.unit_keep_ratios is not None:
+            payload["unit_keep_ratios"] = dict(self.unit_keep_ratios)
         return payload
 
 
@@ -121,6 +124,8 @@ def carve_qwen2_homogeneous(
     output_dir: Path,
     *,
     keep_ratio: float,
+    attention_keep_ratio: Optional[float] = None,
+    ffn_keep_ratio: Optional[float] = None,
     scores_path: Optional[Path] = None,
     override: bool = False,
     progress: Optional[Callable[[str], None]] = None,
@@ -128,7 +133,13 @@ def carve_qwen2_homogeneous(
     """Create a standard-HF-loadable Qwen2 carve with uniform reduced shapes."""
 
     keep_ratio = validate_keep_ratio(keep_ratio)
-    if keep_ratio == 1.0:
+    attention_keep_ratio = validate_keep_ratio(
+        1.0 if attention_keep_ratio is None else attention_keep_ratio
+    )
+    ffn_keep_ratio = validate_keep_ratio(
+        keep_ratio if ffn_keep_ratio is None else ffn_keep_ratio
+    )
+    if attention_keep_ratio == 1.0 and ffn_keep_ratio == 1.0:
         return carve_qwen2_full_keep(
             model_path=model_path,
             output_dir=output_dir,
@@ -152,7 +163,13 @@ def carve_qwen2_homogeneous(
     dims = qwen2_dimensions(config)
     _report(progress, "loading carve scores")
     scores = load_unit_scores(scores_path)
-    keep_set = select_homogeneous_keep_set(dims, keep_ratio, scores)
+    keep_set = select_homogeneous_keep_set(
+        dims,
+        keep_ratio,
+        scores,
+        attention_keep_ratio=attention_keep_ratio,
+        ffn_keep_ratio=ffn_keep_ratio,
+    )
     _report(progress, "loading source model weights")
     state_dict, weight_format = load_model_state_dict(model_path)
     _report(progress, "slicing Qwen2 weights")
@@ -169,15 +186,19 @@ def carve_qwen2_homogeneous(
         keep_set=keep_set,
         dimensions={
             "num_layers": dims.num_layers,
-            "hidden_size": len(keep_set.hidden_indices),
-            "intermediate_size": len(keep_set.ffn_channels),
-            "num_attention_heads": len(keep_set.query_heads),
-            "num_key_value_heads": len(keep_set.kv_groups),
+            "hidden_size": dims.hidden_size,
+            "intermediate_size": keep_set.intermediate_size,
+            "num_attention_heads": keep_set.num_query_heads,
+            "num_key_value_heads": keep_set.num_kv_groups,
             "head_dim": dims.head_dim,
             "query_heads_per_kv": dims.query_heads_per_kv,
         },
         carve_type="homogeneous_repack",
         scores_path=scores_path,
+        unit_keep_ratios={
+            "attention": attention_keep_ratio,
+            "ffn": ffn_keep_ratio,
+        },
     )
 
     _report(
@@ -234,27 +255,28 @@ def build_carve_manifest(
     dimensions: Mapping[str, int],
     carve_type: str,
     scores_path: Optional[Path] = None,
+    unit_keep_ratios: Optional[Mapping[str, float]] = None,
 ) -> CarveManifest:
     kept = {
         LAYER: [unit.id.key() for unit in unit_map.by_kind(LAYER)],
         QUERY_HEAD: [
             unit.id.key()
             for unit in unit_map.by_kind(QUERY_HEAD)
-            if unit.id.index in keep_set.query_heads
+            if unit.id.index in keep_set.layers[unit.id.layer].query_heads
         ],
         KV_HEAD_GROUP: [
             unit.id.key()
             for unit in unit_map.by_kind(KV_HEAD_GROUP)
-            if unit.id.index in keep_set.kv_groups
+            if unit.id.index in keep_set.layers[unit.id.layer].kv_groups
         ],
         FFN_CHANNEL: [
             unit.id.key()
             for unit in unit_map.by_kind(FFN_CHANNEL)
-            if unit.id.index in keep_set.ffn_channels
+            if unit.id.index in keep_set.layers[unit.id.layer].ffn_channels
         ],
     }
     return CarveManifest(
-        artifact_version=1,
+        artifact_version=2,
         architecture=unit_map.architecture,
         carve_type=carve_type,
         keep_ratio=keep_ratio,
@@ -264,15 +286,23 @@ def build_carve_manifest(
         kept_units=kept,
         dimensions=dimensions,
         scores_path=str(scores_path) if scores_path is not None else None,
+        unit_keep_ratios=unit_keep_ratios,
     )
 
 
 @dataclass(frozen=True)
-class HomogeneousKeepSet:
+class LayerKeepSet:
     query_heads: Tuple[int, ...]
     kv_groups: Tuple[int, ...]
     ffn_channels: Tuple[int, ...]
-    hidden_indices: Tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class HomogeneousKeepSet:
+    layers: Mapping[int, LayerKeepSet]
+    num_query_heads: int
+    num_kv_groups: int
+    intermediate_size: int
 
 
 def load_unit_scores(scores_path: Optional[Path]) -> Mapping[str, float]:
@@ -318,37 +348,58 @@ def select_homogeneous_keep_set(
     dims: Any,
     keep_ratio: float,
     scores: Mapping[str, float],
+    *,
+    attention_keep_ratio: Optional[float] = None,
+    ffn_keep_ratio: Optional[float] = None,
 ) -> HomogeneousKeepSet:
-    keep_kv = _kept_count(dims.num_key_value_heads, keep_ratio)
-    keep_ffn = _kept_count(dims.intermediate_size, keep_ratio)
-    kv_groups = _select_indices(
-        dims.num_key_value_heads,
-        keep_kv,
-        lambda index: _score_kv_group(scores, dims, index),
+    attention_keep_ratio = validate_keep_ratio(
+        1.0 if attention_keep_ratio is None else attention_keep_ratio
     )
-    query_heads = tuple(
-        head
-        for kv_group in kv_groups
-        for head in range(
-            kv_group * dims.query_heads_per_kv,
-            (kv_group + 1) * dims.query_heads_per_kv,
+    ffn_keep_ratio = validate_keep_ratio(
+        keep_ratio if ffn_keep_ratio is None else ffn_keep_ratio
+    )
+    keep_query_per_kv = _kept_count(
+        dims.query_heads_per_kv,
+        attention_keep_ratio,
+    )
+    keep_ffn = _kept_count(dims.intermediate_size, ffn_keep_ratio)
+    layers: Dict[int, LayerKeepSet] = {}
+    for layer in range(dims.num_layers):
+        kv_groups = tuple(range(dims.num_key_value_heads))
+        query_heads = []
+        for kv_group in kv_groups:
+            query_start = kv_group * dims.query_heads_per_kv
+            selected_offsets = _select_indices(
+                dims.query_heads_per_kv,
+                keep_query_per_kv,
+                lambda offset, layer=layer, query_start=query_start: _score_index(
+                    scores,
+                    QUERY_HEAD,
+                    layer,
+                    query_start + offset,
+                ),
+            )
+            query_heads.extend(query_start + offset for offset in selected_offsets)
+        ffn_channels = _select_indices(
+            dims.intermediate_size,
+            keep_ffn,
+            lambda index, layer=layer: _score_index(
+                scores,
+                FFN_CHANNEL,
+                layer,
+                index,
+            ),
         )
-    )
-    ffn_channels = _select_indices(
-        dims.intermediate_size,
-        keep_ffn,
-        lambda index: _score_index(scores, FFN_CHANNEL, index),
-    )
-    hidden_indices = tuple(
-        dim
-        for head in query_heads
-        for dim in range(head * dims.head_dim, (head + 1) * dims.head_dim)
-    )
+        layers[layer] = LayerKeepSet(
+            query_heads=tuple(query_heads),
+            kv_groups=tuple(sorted(kv_groups)),
+            ffn_channels=tuple(sorted(ffn_channels)),
+        )
     return HomogeneousKeepSet(
-        query_heads=tuple(sorted(query_heads)),
-        kv_groups=tuple(sorted(kv_groups)),
-        ffn_channels=tuple(sorted(ffn_channels)),
-        hidden_indices=tuple(sorted(hidden_indices)),
+        layers=layers,
+        num_query_heads=dims.num_key_value_heads * keep_query_per_kv,
+        num_kv_groups=dims.num_key_value_heads,
+        intermediate_size=keep_ffn,
     )
 
 
@@ -359,54 +410,58 @@ def slice_qwen2_state_dict(
 ) -> Dict[str, Any]:
     import torch
 
-    hidden = torch.tensor(keep_set.hidden_indices, dtype=torch.long)
-    query_rows = hidden
-    kv_rows = torch.tensor(
-        [
-            dim
-            for kv_group in keep_set.kv_groups
-            for dim in range(kv_group * dims.head_dim, (kv_group + 1) * dims.head_dim)
-        ],
-        dtype=torch.long,
-    )
-    ffn = torch.tensor(keep_set.ffn_channels, dtype=torch.long)
+    layer_indices = {}
+    for layer, layer_keep in keep_set.layers.items():
+        query_rows = torch.tensor(
+            [
+                dim
+                for head in layer_keep.query_heads
+                for dim in range(head * dims.head_dim, (head + 1) * dims.head_dim)
+            ],
+            dtype=torch.long,
+        )
+        kv_rows = torch.tensor(
+            [
+                dim
+                for kv_group in layer_keep.kv_groups
+                for dim in range(
+                    kv_group * dims.head_dim,
+                    (kv_group + 1) * dims.head_dim,
+                )
+            ],
+            dtype=torch.long,
+        )
+        ffn = torch.tensor(layer_keep.ffn_channels, dtype=torch.long)
+        layer_indices[layer] = (query_rows, kv_rows, ffn)
+
     carved: Dict[str, Any] = {}
     for name, tensor in state_dict.items():
         value = tensor.detach().cpu()
-        if name == "model.embed_tokens.weight" or name == "lm_head.weight":
-            carved[name] = _index_select(value, 1, hidden)
-            continue
-        if name == "model.norm.weight":
-            carved[name] = _index_select(value, 0, hidden)
-            continue
         layer = _layer_from_name(name)
         if layer is None:
             carved[name] = value
             continue
-        if name.endswith(".input_layernorm.weight") or name.endswith(
-            ".post_attention_layernorm.weight"
-        ):
-            carved[name] = _index_select(value, 0, hidden)
-        elif name.endswith(".self_attn.q_proj.weight"):
-            carved[name] = _index_select(_index_select(value, 0, query_rows), 1, hidden)
+        query_rows, kv_rows, ffn = layer_indices[layer]
+        if name.endswith(".self_attn.q_proj.weight"):
+            carved[name] = _index_select(value, 0, query_rows)
         elif name.endswith(".self_attn.q_proj.bias"):
             carved[name] = _index_select(value, 0, query_rows)
         elif name.endswith(".self_attn.k_proj.weight") or name.endswith(
             ".self_attn.v_proj.weight"
         ):
-            carved[name] = _index_select(_index_select(value, 0, kv_rows), 1, hidden)
+            carved[name] = _index_select(value, 0, kv_rows)
         elif name.endswith(".self_attn.k_proj.bias") or name.endswith(
             ".self_attn.v_proj.bias"
         ):
             carved[name] = _index_select(value, 0, kv_rows)
         elif name.endswith(".self_attn.o_proj.weight"):
-            carved[name] = _index_select(_index_select(value, 0, hidden), 1, query_rows)
+            carved[name] = _index_select(value, 1, query_rows)
         elif name.endswith(".mlp.gate_proj.weight") or name.endswith(
             ".mlp.up_proj.weight"
         ):
-            carved[name] = _index_select(_index_select(value, 0, ffn), 1, hidden)
+            carved[name] = _index_select(value, 0, ffn)
         elif name.endswith(".mlp.down_proj.weight"):
-            carved[name] = _index_select(_index_select(value, 0, hidden), 1, ffn)
+            carved[name] = _index_select(value, 1, ffn)
         else:
             carved[name] = value
     return carved
@@ -418,13 +473,14 @@ def build_carved_qwen2_config(
     keep_set: HomogeneousKeepSet,
 ) -> Dict[str, Any]:
     carved = dict(config)
-    carved["hidden_size"] = len(keep_set.hidden_indices)
-    carved["intermediate_size"] = len(keep_set.ffn_channels)
-    carved["num_attention_heads"] = len(keep_set.query_heads)
-    carved["num_key_value_heads"] = len(keep_set.kv_groups)
+    carved["hidden_size"] = dims.hidden_size
+    carved["intermediate_size"] = keep_set.intermediate_size
+    carved["num_attention_heads"] = keep_set.num_query_heads
+    carved["num_key_value_heads"] = keep_set.num_kv_groups
+    carved["head_dim"] = dims.head_dim
     carved["architectures"] = ["Qwen2ForCausalLM"]
     carved["idn_carve"] = {
-        "version": 1,
+        "version": 2,
         "mode": "homogeneous",
         "source_dimensions": {
             "num_layers": dims.num_layers,
@@ -435,14 +491,22 @@ def build_carved_qwen2_config(
             "head_dim": dims.head_dim,
             "query_heads_per_kv": dims.query_heads_per_kv,
         },
-        "kept_query_heads": list(keep_set.query_heads),
-        "kept_kv_groups": list(keep_set.kv_groups),
-        "kept_ffn_channels": list(keep_set.ffn_channels),
-        "kept_hidden_indices": list(keep_set.hidden_indices),
+        "kept_query_heads_by_layer": {
+            str(layer): list(layer_keep.query_heads)
+            for layer, layer_keep in keep_set.layers.items()
+        },
+        "kept_kv_groups_by_layer": {
+            str(layer): list(layer_keep.kv_groups)
+            for layer, layer_keep in keep_set.layers.items()
+        },
+        "kept_ffn_channels_by_layer": {
+            str(layer): list(layer_keep.ffn_channels)
+            for layer, layer_keep in keep_set.layers.items()
+        },
     }
-    if carved["hidden_size"] != carved["num_attention_heads"] * dims.head_dim:
+    if carved["num_attention_heads"] % carved["num_key_value_heads"] != 0:
         raise CarveError(
-            "Internal carve error: hidden_size does not match kept query heads"
+            "Internal carve error: query heads are not divisible by KV groups"
         )
     return carved
 
@@ -581,29 +645,14 @@ def _select_indices(
     return tuple(sorted(ranked[:count]))
 
 
-def _score_index(scores: Mapping[str, float], kind: str, index: int) -> float:
-    values = [
-        value
-        for key, value in scores.items()
-        if key.startswith("{0}:".format(kind)) and key.endswith(":{0}".format(index))
-    ]
-    if values:
-        return sum(values) / len(values)
-    return float(index)
-
-
-def _score_kv_group(scores: Mapping[str, float], dims: Any, kv_group: int) -> float:
-    if not scores:
-        return float(kv_group)
-    values = [_score_index(scores, KV_HEAD_GROUP, kv_group)]
-    values.extend(
-        _score_index(scores, QUERY_HEAD, query_head)
-        for query_head in range(
-            kv_group * dims.query_heads_per_kv,
-            (kv_group + 1) * dims.query_heads_per_kv,
-        )
-    )
-    return sum(values) / len(values)
+def _score_index(
+    scores: Mapping[str, float],
+    kind: str,
+    layer: int,
+    index: int,
+) -> float:
+    key = "{0}:{1}:{2}".format(kind, layer, index)
+    return float(scores.get(key, 0.0))
 
 
 def _index_select(tensor: Any, dim: int, index: Any) -> Any:
