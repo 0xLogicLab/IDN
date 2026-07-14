@@ -24,6 +24,7 @@ from idn.config import (
     resolve_relative_dir,
 )
 from idn.extraction.carve import CarveError, carve_qwen2_homogeneous, validate_keep_ratio
+from idn.extraction.heal import HealError, heal_qwen2_lora
 from idn.extraction.locate import LocateError, locate_qwen2_units
 from idn.eval.runner import run_eval
 from idn.registry import iter_capabilities, spec_from_config
@@ -347,6 +348,75 @@ def build_parser() -> argparse.ArgumentParser:
     )
     carve_parser.set_defaults(func=cmd_carve)
 
+    heal_parser = subparsers.add_parser(
+        "heal",
+        help="Heal a carved Qwen2 model with teacher-guided LoRA distillation.",
+    )
+    heal_parser.add_argument("--config", required=True, help="Capability YAML.")
+    heal_parser.add_argument(
+        "--carved",
+        required=True,
+        help="Carved model artifact directory.",
+    )
+    heal_parser.add_argument(
+        "--teacher",
+        required=True,
+        help="Teacher model relative to --model-dir or machine model_dir.",
+    )
+    heal_parser.add_argument(
+        "--model-dir",
+        default=None,
+        help="Override the machine config model_dir used to resolve --teacher.",
+    )
+    heal_parser.add_argument(
+        "--split",
+        default=None,
+        help="Unlabeled prompt split. Defaults to capability train_split.",
+    )
+    heal_parser.add_argument("--num-examples", type=int, default=128)
+    heal_parser.add_argument("--steps", type=int, default=500)
+    heal_parser.add_argument("--learning-rate", type=float, default=2.0e-4)
+    heal_parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+    heal_parser.add_argument("--max-length", type=int, default=512)
+    heal_parser.add_argument("--max-new-tokens", type=int, default=None)
+    heal_parser.add_argument("--temperature", type=float, default=2.0)
+    heal_parser.add_argument("--kl-weight", type=float, default=1.0)
+    heal_parser.add_argument("--hidden-weight", type=float, default=0.1)
+    heal_parser.add_argument("--hidden-layer-stride", type=int, default=4)
+    heal_parser.add_argument("--lora-rank", type=int, default=16)
+    heal_parser.add_argument("--lora-alpha", type=int, default=None)
+    heal_parser.add_argument("--lora-dropout", type=float, default=0.05)
+    heal_parser.add_argument(
+        "--target-modules",
+        default="gate_proj,up_proj,down_proj",
+        help="Comma-separated LoRA target module suffixes.",
+    )
+    heal_parser.add_argument("--warmup-ratio", type=float, default=0.03)
+    heal_parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    heal_parser.add_argument("--dtype", default="bfloat16")
+    heal_parser.add_argument("--seed", type=int, default=13)
+    heal_parser.add_argument(
+        "--no-gradient-checkpointing",
+        action="store_true",
+        help="Disable student gradient checkpointing.",
+    )
+    heal_parser.add_argument(
+        "--allow-invalid-teacher",
+        action="store_true",
+        help="Keep non-empty teacher answers that fail capability verification.",
+    )
+    heal_parser.add_argument(
+        "--output",
+        default=None,
+        help="Output directory for adapter and training reports.",
+    )
+    heal_parser.add_argument(
+        "--override",
+        action="store_true",
+        help="Replace an existing heal output directory.",
+    )
+    heal_parser.set_defaults(func=cmd_heal)
+
     for name in (
         "gen-teacher",
         "build-sft",
@@ -601,6 +671,82 @@ def cmd_carve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_heal(args: argparse.Namespace) -> int:
+    resolved = load_resolved_config(Path(args.config), args.machine)
+    spec = spec_from_config(resolved.capability)
+    if spec is None:
+        raise SystemExit(
+            "Capability '{0}' is not implemented yet.".format(resolved.capability.id)
+        )
+    model_base_dir = args.model_dir or resolved.machine.model_dir
+    teacher_path = Path(
+        resolve_relative_dir(
+            base_dir=model_base_dir,
+            relative_dir=args.teacher,
+            field="--teacher",
+        )
+    )
+    carved_path = Path(args.carved)
+    split = args.split or resolved.capability.train_split
+    target_modules = tuple(
+        item.strip() for item in args.target_modules.split(",") if item.strip()
+    )
+    if not target_modules:
+        raise HealError("--target-modules must contain at least one module")
+    output_path = Path(args.output) if args.output else default_heal_output_path(
+        artifact_dir=DEFAULT_ARTIFACT_DIR,
+        capability_id=resolved.capability.id,
+        carved_model_path=carved_path,
+        steps=args.steps,
+        lora_rank=args.lora_rank,
+    )
+    max_new_tokens = args.max_new_tokens or resolved.capability.max_new_tokens
+    print("Starting heal.")
+    print("capability: {0}".format(resolved.capability.id))
+    print("split: {0}".format(split))
+    print("examples: {0}".format(args.num_examples))
+    print("steps: {0}".format(args.steps))
+    print("teacher: {0}".format(teacher_path))
+    print("carved: {0}".format(carved_path))
+    print("output: {0}".format(output_path))
+    result = heal_qwen2_lora(
+        carved_model_path=carved_path,
+        teacher_model_path=teacher_path,
+        spec=spec,
+        split=split,
+        num_examples=args.num_examples,
+        output_dir=output_path,
+        steps=args.steps,
+        learning_rate=args.learning_rate,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        max_length=args.max_length,
+        max_new_tokens=max_new_tokens,
+        temperature=args.temperature,
+        kl_weight=args.kl_weight,
+        hidden_weight=args.hidden_weight,
+        hidden_layer_stride=args.hidden_layer_stride,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        target_modules=target_modules,
+        warmup_ratio=args.warmup_ratio,
+        max_grad_norm=args.max_grad_norm,
+        dtype=args.dtype,
+        device=resolved.machine.device,
+        local_files_only=resolved.machine.local_files_only,
+        seed=args.seed,
+        gradient_checkpointing=not args.no_gradient_checkpointing,
+        require_valid_teacher=not args.allow_invalid_teacher,
+        override=args.override,
+        progress=print_heal_progress,
+    )
+    print("Heal complete.")
+    print("adapter: {0}".format(result.adapter_dir))
+    print("report: {0}".format(output_path / "report.json"))
+    print("training_log: {0}".format(output_path / "training_log.json"))
+    return 0
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     resolved = load_resolved_config(Path(args.config), args.machine)
     spec = spec_from_config(resolved.capability)
@@ -720,6 +866,18 @@ def default_locate_output_path(
     return artifact_dir / "locate" / safe_slug(capability_id) / dirname
 
 
+def default_heal_output_path(
+    artifact_dir: Path,
+    capability_id: str,
+    carved_model_path: Path,
+    steps: int,
+    lora_rank: int,
+) -> Path:
+    carved_name = safe_slug(Path(carved_model_path).name or str(carved_model_path))
+    dirname = "{0}_lora_r{1}_s{2}".format(carved_name, lora_rank, steps)
+    return artifact_dir / "heal" / safe_slug(capability_id) / dirname
+
+
 def format_keep_ratio(keep_ratio: float) -> str:
     ratio = "{0:.6f}".format(float(keep_ratio)).rstrip("0").rstrip(".")
     if "." not in ratio:
@@ -733,6 +891,10 @@ def print_progress(message: str) -> None:
 
 def print_locate_progress(message: str) -> None:
     print("[locate] {0}".format(message), flush=True)
+
+
+def print_heal_progress(message: str) -> None:
+    print("[heal] {0}".format(message), flush=True)
 
 
 def safe_slug(value: str) -> str:
@@ -783,6 +945,9 @@ def main(argv: List[str] = None) -> int:
         return 2
     except LocateError as exc:
         print("locate error: {0}".format(exc), file=sys.stderr)
+        return 2
+    except HealError as exc:
+        print("heal error: {0}".format(exc), file=sys.stderr)
         return 2
 
 
