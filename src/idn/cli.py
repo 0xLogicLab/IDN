@@ -29,6 +29,7 @@ from idn.extraction.heal import HealError, heal_qwen2_lora
 from idn.extraction.locate import LocateError, locate_qwen2_units
 from idn.eval.runner import run_eval
 from idn.registry import iter_capabilities, spec_from_config
+from idn.serving.gate import GateError, evaluate_certificate_gate
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -460,6 +461,17 @@ def build_parser() -> argparse.ArgumentParser:
     certify_parser.add_argument("--scope-components", type=int, default=32)
     certify_parser.add_argument("--scope-regularization", type=float, default=1.0e-4)
     certify_parser.add_argument("--scope-percentile", type=float, default=95.0)
+    certify_parser.add_argument(
+        "--scope-split",
+        default=None,
+        help="Unlabeled scope calibration split. Defaults to capability train_split.",
+    )
+    certify_parser.add_argument(
+        "--scope-num-examples",
+        type=int,
+        default=300,
+        help="Scope calibration examples. Use 0 for the full split.",
+    )
     certify_parser.add_argument("--dtype", default="bfloat16")
     certify_parser.add_argument("--output", default=None)
     certify_parser.add_argument(
@@ -468,6 +480,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replace an existing certificate output directory.",
     )
     certify_parser.set_defaults(func=cmd_certify)
+
+    gate_eval_parser = subparsers.add_parser(
+        "gate-eval",
+        help="Simulate scope routing from a certificate probe artifact.",
+    )
+    gate_eval_parser.add_argument("--config", required=True, help="Capability YAML.")
+    gate_eval_parser.add_argument(
+        "--certificate",
+        required=True,
+        help="Certificate directory containing certificate.json and probe_records.json.",
+    )
+    gate_eval_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Override the certificate Mahalanobis threshold.",
+    )
+    gate_eval_parser.add_argument("--output", default=None)
+    gate_eval_parser.set_defaults(func=cmd_gate_eval)
 
     for name in (
         "gen-teacher",
@@ -820,6 +851,8 @@ def cmd_certify(args: argparse.Namespace) -> int:
     limit = None if args.num_examples == 0 else args.num_examples
     epsilon = resolved.capability.epsilon if args.epsilon is None else args.epsilon
     max_new_tokens = args.max_new_tokens or resolved.capability.max_new_tokens
+    scope_split = args.scope_split or resolved.capability.train_split
+    scope_limit = None if args.scope_num_examples == 0 else args.scope_num_examples
     output_path = Path(args.output) if args.output else default_certify_output_path(
         artifact_dir=DEFAULT_ARTIFACT_DIR,
         capability_id=resolved.capability.id,
@@ -831,6 +864,12 @@ def cmd_certify(args: argparse.Namespace) -> int:
     print("split: {0}".format(split))
     print("examples: {0}".format("full" if limit is None else limit))
     print("epsilon: {0}".format(epsilon))
+    print(
+        "scope_calibration: {0} ({1})".format(
+            scope_split,
+            "full" if scope_limit is None else scope_limit,
+        )
+    )
     print("teacher: {0}".format(teacher_path))
     print("carved: {0}".format(carved_path))
     print("adapter: {0}".format(adapter_path))
@@ -852,6 +891,8 @@ def cmd_certify(args: argparse.Namespace) -> int:
         scope_components=args.scope_components,
         scope_regularization=args.scope_regularization,
         scope_percentile=args.scope_percentile,
+        scope_split=scope_split,
+        scope_limit=scope_limit,
         dtype=args.dtype,
         device=resolved.machine.device,
         local_files_only=resolved.machine.local_files_only,
@@ -861,10 +902,52 @@ def cmd_certify(args: argparse.Namespace) -> int:
     quality = result.certificate["quality"]
     print("Certification complete.")
     print("status: {0}".format(result.certificate["status"]))
-    print("teacher_{0}: {1}".format(spec.metric_name, quality["teacher_metrics"][spec.metric_name]))
-    print("student_{0}: {1}".format(spec.metric_name, quality["student_metrics"][spec.metric_name]))
+    print(
+        "teacher_{0}: {1}".format(
+            spec.metric_name,
+            quality["teacher_metrics"][spec.metric_name],
+        )
+    )
+    print(
+        "student_{0}: {1}".format(
+            spec.metric_name,
+            quality["student_metrics"][spec.metric_name],
+        )
+    )
     print("metric_gap: {0}".format(quality["metric_gap"]))
     print("certificate: {0}".format(result.certificate_path))
+    return 0
+
+
+def cmd_gate_eval(args: argparse.Namespace) -> int:
+    resolved = load_resolved_config(Path(args.config), args.machine)
+    spec = spec_from_config(resolved.capability)
+    if spec is None:
+        raise SystemExit(
+            "Capability '{0}' is not implemented yet.".format(resolved.capability.id)
+        )
+    certificate_dir = Path(args.certificate)
+    output_path = Path(args.output) if args.output else default_gate_eval_output_path(
+        artifact_dir=DEFAULT_ARTIFACT_DIR,
+        capability_id=resolved.capability.id,
+        certificate_dir=certificate_dir,
+    )
+    result = evaluate_certificate_gate(
+        spec=spec,
+        certificate_dir=certificate_dir,
+        output_path=output_path,
+        threshold=args.threshold,
+    )
+    print("Gate evaluation complete.")
+    print("local_coverage: {0}".format(result["local_coverage"]))
+    print("fallback_rate: {0}".format(result["fallback_rate"]))
+    print(
+        "routed_{0}: {1}".format(
+            spec.metric_name,
+            result["routed_metrics"][spec.metric_name],
+        )
+    )
+    print("output: {0}".format(output_path))
     return 0
 
 
@@ -1012,6 +1095,15 @@ def default_certify_output_path(
     return artifact_dir / "certify" / safe_slug(capability_id) / dirname
 
 
+def default_gate_eval_output_path(
+    artifact_dir: Path,
+    capability_id: str,
+    certificate_dir: Path,
+) -> Path:
+    identity = safe_slug(Path(certificate_dir).name or str(certificate_dir))
+    return artifact_dir / "gate_eval" / safe_slug(capability_id) / "{0}.json".format(identity)
+
+
 def format_keep_ratio(keep_ratio: float) -> str:
     ratio = "{0:.6f}".format(float(keep_ratio)).rstrip("0").rstrip(".")
     if "." not in ratio:
@@ -1089,6 +1181,9 @@ def main(argv: List[str] = None) -> int:
         return 2
     except CertifyError as exc:
         print("certify error: {0}".format(exc), file=sys.stderr)
+        return 2
+    except GateError as exc:
+        print("gate error: {0}".format(exc), file=sys.stderr)
         return 2
 
 

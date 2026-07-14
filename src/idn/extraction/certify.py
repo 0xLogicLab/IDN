@@ -47,6 +47,8 @@ def certify_qwen2(
     scope_components: int = 32,
     scope_regularization: float = 1.0e-4,
     scope_percentile: float = 95.0,
+    scope_split: Optional[str] = None,
+    scope_limit: Optional[int] = 300,
     dtype: str = "bfloat16",
     device: str = "cuda",
     local_files_only: bool = True,
@@ -66,6 +68,7 @@ def certify_qwen2(
         scope_components=scope_components,
         scope_regularization=scope_regularization,
         scope_percentile=scope_percentile,
+        scope_limit=scope_limit,
     )
     carved_model_path = Path(carved_model_path)
     adapter_path = Path(adapter_path)
@@ -153,12 +156,13 @@ def certify_qwen2(
     hidden_cosines: Dict[int, List[float]] = {
         index: [] for index in faithfulness_indices
     }
-    scope_vectors = []
+    probe_scope_vectors = []
     prompt_budget = max_length - max_new_tokens
     started_at = _utc_now()
 
     for probe_index, example in enumerate(examples, start=1):
-        _report(progress, "probe {0}/{1}".format(probe_index, len(examples)))
+        if probe_index == 1 or probe_index % 10 == 0 or probe_index == len(examples):
+            _report(progress, "probe {0}/{1}".format(probe_index, len(examples)))
         prompt = render_prompt(tokenizer, spec.format_prompt(example))
         prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
         prompt_ids = list(prompt_ids)[-prompt_budget:]
@@ -258,7 +262,7 @@ def certify_qwen2(
             prompt_length - 1,
             :,
         ].float().detach().cpu().numpy()
-        scope_vectors.append(scope_vector)
+        probe_scope_vectors.append(scope_vector)
         teacher_predictions.append(teacher_parsed)
         student_predictions.append(student_parsed)
         references.append(example.reference)
@@ -307,13 +311,43 @@ def certify_qwen2(
         references=references,
     )
 
+    calibration_split = scope_split or split
+    calibration_examples = spec.load_split(
+        split=calibration_split,
+        limit=scope_limit,
+    )
+    if len(calibration_examples) < 2:
+        raise CertifyError("scope calibration requires at least two examples")
+    _report(
+        progress,
+        "calibrating scope on {0} {1} examples".format(
+            len(calibration_examples),
+            calibration_split,
+        ),
+    )
+    calibration_vectors = collect_scope_vectors(
+        student=student,
+        tokenizer=tokenizer,
+        spec=spec,
+        examples=calibration_examples,
+        max_prompt_tokens=prompt_budget,
+        scope_layer=scope_layer,
+        device=target_device,
+        progress=progress,
+    )
     scope = build_scope_model(
-        vectors=np.stack(scope_vectors),
+        vectors=np.stack(calibration_vectors),
         components=scope_components,
         regularization=scope_regularization,
         percentile=scope_percentile,
     )
-    for record, distance in zip(prediction_records, scope["distances"]):
+    probe_distances = scope_distances(
+        vectors=np.stack(probe_scope_vectors),
+        center=scope["mean"],
+        components=scope["components"],
+        inverse_covariance=scope["inverse_covariance"],
+    )
+    for record, distance in zip(prediction_records, probe_distances):
         record["scope_mahalanobis"] = float(distance)
 
     scope_path = output_dir / "scope.npz"
@@ -364,8 +398,13 @@ def certify_qwen2(
             "regularization": scope_regularization,
             "distance_percentile": scope_percentile,
             "mahalanobis_threshold": float(scope["threshold"]),
-            "in_domain_false_positive_rate": float(
+            "calibration_split": calibration_split,
+            "calibration_examples": len(calibration_examples),
+            "calibration_false_positive_rate": float(
                 mean(float(value > scope["threshold"]) for value in scope["distances"])
+            ),
+            "probe_out_of_scope_rate": float(
+                mean(float(value > scope["threshold"]) for value in probe_distances)
             ),
         },
         "resources": {
@@ -497,6 +536,67 @@ def build_scope_model(
     }
 
 
+def collect_scope_vectors(
+    *,
+    student: Any,
+    tokenizer: Any,
+    spec: CapabilitySpec,
+    examples: Sequence[Any],
+    max_prompt_tokens: int,
+    scope_layer: int,
+    device: Any,
+    progress: Optional[Callable[[str], None]] = None,
+) -> List[Any]:
+    import torch
+
+    vectors = []
+    for index, example in enumerate(examples, start=1):
+        if index == 1 or index % 25 == 0 or index == len(examples):
+            _report(progress, "scope calibration {0}/{1}".format(index, len(examples)))
+        prompt = render_prompt(tokenizer, spec.format_prompt(example))
+        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        prompt_ids = list(prompt_ids)[-max_prompt_tokens:]
+        if not prompt_ids:
+            raise CertifyError(
+                "scope example has an empty encoded prompt: {0}".format(example.id)
+            )
+        input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+        with torch.no_grad():
+            output = student(
+                input_ids=input_ids,
+                attention_mask=torch.ones_like(input_ids),
+                use_cache=False,
+                output_hidden_states=True,
+            )
+        vectors.append(
+            output.hidden_states[scope_layer][0, -1, :].float().detach().cpu().numpy()
+        )
+    return vectors
+
+
+def scope_distances(
+    *,
+    vectors: Any,
+    center: Any,
+    components: Any,
+    inverse_covariance: Any,
+) -> Any:
+    import numpy as np
+
+    centered = np.asarray(vectors, dtype=np.float64) - np.asarray(
+        center,
+        dtype=np.float64,
+    )
+    projected = centered @ np.asarray(components, dtype=np.float64).T
+    squared = np.einsum(
+        "ni,ij,nj->n",
+        projected,
+        np.asarray(inverse_covariance, dtype=np.float64),
+        projected,
+    )
+    return np.sqrt(np.maximum(0.0, squared))
+
+
 def scope_mahalanobis(
     *,
     vector: Any,
@@ -506,13 +606,14 @@ def scope_mahalanobis(
 ) -> float:
     import numpy as np
 
-    centered = np.asarray(vector, dtype=np.float64) - np.asarray(
-        center,
-        dtype=np.float64,
+    return float(
+        scope_distances(
+            vectors=np.asarray([vector]),
+            center=center,
+            components=components,
+            inverse_covariance=inverse_covariance,
+        )[0]
     )
-    projected = centered @ np.asarray(components, dtype=np.float64).T
-    squared = projected @ np.asarray(inverse_covariance, dtype=np.float64) @ projected
-    return float(np.sqrt(max(0.0, squared)))
 
 
 def write_scope_npz(path: Path, scope: Mapping[str, Any]) -> None:
@@ -595,6 +696,8 @@ def _validate_directory(path: Path, label: str) -> None:
 def _validate_args(**values: Any) -> None:
     if values["limit"] is not None and int(values["limit"]) <= 0:
         raise CertifyError("limit must be positive or None")
+    if values["scope_limit"] is not None and int(values["scope_limit"]) <= 0:
+        raise CertifyError("scope_limit must be positive or None")
     for name in (
         "max_length",
         "max_new_tokens",
