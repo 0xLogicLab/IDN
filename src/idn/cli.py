@@ -24,6 +24,7 @@ from idn.config import (
     resolve_relative_dir,
 )
 from idn.extraction.carve import CarveError, carve_qwen2_homogeneous, validate_keep_ratio
+from idn.extraction.certify import CertifyError, certify_qwen2
 from idn.extraction.heal import HealError, heal_qwen2_lora
 from idn.extraction.locate import LocateError, locate_qwen2_units
 from idn.eval.runner import run_eval
@@ -417,6 +418,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     heal_parser.set_defaults(func=cmd_heal)
 
+    certify_parser = subparsers.add_parser(
+        "certify",
+        help="Certify a healed Qwen2 carve against its teacher.",
+    )
+    certify_parser.add_argument("--config", required=True, help="Capability YAML.")
+    certify_parser.add_argument("--carved", required=True, help="Carved model directory.")
+    certify_parser.add_argument("--adapter", required=True, help="HEAL adapter directory.")
+    certify_parser.add_argument(
+        "--teacher",
+        required=True,
+        help="Teacher model relative to --model-dir or machine model_dir.",
+    )
+    certify_parser.add_argument(
+        "--model-dir",
+        default=None,
+        help="Override the machine config model_dir used to resolve --teacher.",
+    )
+    certify_parser.add_argument(
+        "--split",
+        default=None,
+        help="Held-out probe split. Defaults to capability eval_split.",
+    )
+    certify_parser.add_argument(
+        "--num-examples",
+        type=int,
+        default=300,
+        help="Probe examples. Use 0 for the full split.",
+    )
+    certify_parser.add_argument(
+        "--epsilon",
+        type=float,
+        default=None,
+        help="Accepted metric gap. Defaults to capability epsilon.",
+    )
+    certify_parser.add_argument("--max-length", type=int, default=512)
+    certify_parser.add_argument("--max-new-tokens", type=int, default=None)
+    certify_parser.add_argument("--temperature", type=float, default=1.0)
+    certify_parser.add_argument("--hidden-layer-stride", type=int, default=4)
+    certify_parser.add_argument("--scope-layer", type=int, default=4)
+    certify_parser.add_argument("--scope-components", type=int, default=32)
+    certify_parser.add_argument("--scope-regularization", type=float, default=1.0e-4)
+    certify_parser.add_argument("--scope-percentile", type=float, default=95.0)
+    certify_parser.add_argument("--dtype", default="bfloat16")
+    certify_parser.add_argument("--output", default=None)
+    certify_parser.add_argument(
+        "--override",
+        action="store_true",
+        help="Replace an existing certificate output directory.",
+    )
+    certify_parser.set_defaults(func=cmd_certify)
+
     for name in (
         "gen-teacher",
         "build-sft",
@@ -747,6 +799,75 @@ def cmd_heal(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_certify(args: argparse.Namespace) -> int:
+    resolved = load_resolved_config(Path(args.config), args.machine)
+    spec = spec_from_config(resolved.capability)
+    if spec is None:
+        raise SystemExit(
+            "Capability '{0}' is not implemented yet.".format(resolved.capability.id)
+        )
+    model_base_dir = args.model_dir or resolved.machine.model_dir
+    teacher_path = Path(
+        resolve_relative_dir(
+            base_dir=model_base_dir,
+            relative_dir=args.teacher,
+            field="--teacher",
+        )
+    )
+    carved_path = Path(args.carved)
+    adapter_path = Path(args.adapter)
+    split = args.split or resolved.capability.eval_split
+    limit = None if args.num_examples == 0 else args.num_examples
+    epsilon = resolved.capability.epsilon if args.epsilon is None else args.epsilon
+    max_new_tokens = args.max_new_tokens or resolved.capability.max_new_tokens
+    output_path = Path(args.output) if args.output else default_certify_output_path(
+        artifact_dir=DEFAULT_ARTIFACT_DIR,
+        capability_id=resolved.capability.id,
+        adapter_path=adapter_path,
+        num_examples=limit,
+    )
+    print("Starting certification.")
+    print("capability: {0}".format(resolved.capability.id))
+    print("split: {0}".format(split))
+    print("examples: {0}".format("full" if limit is None else limit))
+    print("epsilon: {0}".format(epsilon))
+    print("teacher: {0}".format(teacher_path))
+    print("carved: {0}".format(carved_path))
+    print("adapter: {0}".format(adapter_path))
+    print("output: {0}".format(output_path))
+    result = certify_qwen2(
+        carved_model_path=carved_path,
+        adapter_path=adapter_path,
+        teacher_model_path=teacher_path,
+        spec=spec,
+        split=split,
+        limit=limit,
+        output_dir=output_path,
+        epsilon=epsilon,
+        max_length=args.max_length,
+        max_new_tokens=max_new_tokens,
+        temperature=args.temperature,
+        hidden_layer_stride=args.hidden_layer_stride,
+        scope_layer=args.scope_layer,
+        scope_components=args.scope_components,
+        scope_regularization=args.scope_regularization,
+        scope_percentile=args.scope_percentile,
+        dtype=args.dtype,
+        device=resolved.machine.device,
+        local_files_only=resolved.machine.local_files_only,
+        override=args.override,
+        progress=print_certify_progress,
+    )
+    quality = result.certificate["quality"]
+    print("Certification complete.")
+    print("status: {0}".format(result.certificate["status"]))
+    print("teacher_{0}: {1}".format(spec.metric_name, quality["teacher_metrics"][spec.metric_name]))
+    print("student_{0}: {1}".format(spec.metric_name, quality["student_metrics"][spec.metric_name]))
+    print("metric_gap: {0}".format(quality["metric_gap"]))
+    print("certificate: {0}".format(result.certificate_path))
+    return 0
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     resolved = load_resolved_config(Path(args.config), args.machine)
     spec = spec_from_config(resolved.capability)
@@ -878,6 +999,19 @@ def default_heal_output_path(
     return artifact_dir / "heal" / safe_slug(capability_id) / dirname
 
 
+def default_certify_output_path(
+    artifact_dir: Path,
+    capability_id: str,
+    adapter_path: Path,
+    num_examples: Optional[int],
+) -> Path:
+    adapter_path = Path(adapter_path)
+    identity = adapter_path.parent.name if adapter_path.name == "adapter" else adapter_path.name
+    count = "full" if num_examples is None else "n{0}".format(num_examples)
+    dirname = "{0}_{1}".format(safe_slug(identity), count)
+    return artifact_dir / "certify" / safe_slug(capability_id) / dirname
+
+
 def format_keep_ratio(keep_ratio: float) -> str:
     ratio = "{0:.6f}".format(float(keep_ratio)).rstrip("0").rstrip(".")
     if "." not in ratio:
@@ -895,6 +1029,10 @@ def print_locate_progress(message: str) -> None:
 
 def print_heal_progress(message: str) -> None:
     print("[heal] {0}".format(message), flush=True)
+
+
+def print_certify_progress(message: str) -> None:
+    print("[certify] {0}".format(message), flush=True)
 
 
 def safe_slug(value: str) -> str:
@@ -948,6 +1086,9 @@ def main(argv: List[str] = None) -> int:
         return 2
     except HealError as exc:
         print("heal error: {0}".format(exc), file=sys.stderr)
+        return 2
+    except CertifyError as exc:
+        print("certify error: {0}".format(exc), file=sys.stderr)
         return 2
 
 
