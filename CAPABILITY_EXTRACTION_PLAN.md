@@ -1,466 +1,440 @@
-# IDN Capability Carving — Implementation & Validation Plan (V3 - White-Box Extraction)
+# IDN Hotspot Capability Packages — Implementation & Validation Plan (V4 - LoRA Basis Compilation)
 
 > **Audience:** this document is written to be handed directly to a coding agent
 > (Claude Code / Codex) to generate the implementation. Every module has a path,
 > a responsibility, and a function/CLI contract.
 
-> **Status:** V3 supersedes the V2 "compression toolbox" plan. V2's five techniques
-> (task vector, sparse routing, layer pruning, mixed-precision quant, QLoRA) are demoted
-> to **baselines**. The core of V3 is a single white-box pipeline:
-> **locate → carve → heal → certify → deliver**.
+> **Status:** V4 supersedes V3 (white-box carving) and V2 (compression toolbox).
+> The technical route follows `局部能力提取方案_PPT大纲.md` and uses its notation.
+> Core claim: the edge model does not globally imitate the teacher; it **routes each
+> request into the correct local parameter state** (a compiled LoRA), and falls back
+> to the teacher outside trusted regions.
 
 ---
 
-## 0. Executive summary — from black-box compression to white-box carving
+## 0. Executive summary
 
-**What we have (empirical, in this repo):**
-1. The 6 capabilities (CoLA, SST-2, SQuAD, GSM8K, CNN/DM, MBPP) **cluster in representation
-   space** (`artifacts/analysis/dataset_embeddings_*`: linear CV accuracy ≈ 0.91) and show
-   capability-contrasting activation structure (`visualize-activations` dashboards).
-2. The 7B teacher significantly outperforms the 1.5B student
-   (`artifacts/eval/`: GSM8K exact_match **0.873 vs 0.688** on the full test set).
-3. Working infrastructure: capability registry, eval runner, model loader (+LoRA attach),
-   activation/embedding analysis. No extraction code exists yet.
+**Setup:** teacher `F_T` = Qwen2.5-7B-Instruct (cloud), edge base `F_θ0` =
+Qwen2.5-1.5B-Instruct (frozen), capabilities = the 6 configured tasks
+(cola, sst2, squad, gsm8k, cnn_dailymail, mbpp).
 
-**Why V2 was wrong as a thesis:** every V2 technique treats the model as a black box and
-buys size with accuracy ("within ε"). That is compression, not intelligence delivery, and
-its novelty is low. The user-facing requirement is *teacher-level accuracy at the edge*,
-which black-box compression cannot promise.
+**Known baselines (this repo):** GSM8K exact_match — 7B: **0.873**, 1.5B: **0.688**
+(`artifacts/eval/`). Representation-space clustering of the 6 capabilities is strong
+(linear CV accuracy ≈ 0.91, `artifacts/analysis/`), which is the premise for routing.
 
-**The V3 thesis (the research claim):**
+**The pipeline (five stages):**
 
-> An inference capability of a large LLM is a **causally localizable sub-computation**.
-> It can be **located** with attribution-based circuit discovery (no training),
-> **carved out** as a structurally repacked dense sub-model (no training),
-> **healed** cheaply using the teacher's own activations as supervision (no labeled data),
-> and **certified** for fidelity against the teacher (measurable guarantee).
-> The certified artifact is a first-class **network object** that IDN delivers to the edge
-> the way a CDN delivers content objects.
+1. **Specialize** — for each capability `k`, fine-tune a LoRA `Δ_k` on the frozen 1.5B.
+   Each `⟨routing boundary, Δ_k⟩` is a **hotspot capability package (热点能力包)** `C_k`.
+2. **Route** — embed each request query-only, project by PCA, keep per-capability
+   centroids `μ_k, Σ_k`; a request gets Mahalanobis distances `d_k(x)` and soft weights
+   `r_k(x) = softmax(−d_k/T)`.
+3. **Naive mixing (expected to fail, and that's the point)** — form
+   `Δ(x) = Σ_k r_k(x)·Δ_k` by direct weight averaging. Independently trained LoRAs live
+   in inconsistent low-rank subspaces, so this should degrade. We run it anyway: the
+   measured conflict (cosine/sign conflict vs quality drop) is the *evidence* that
+   motivates stage 4.
+4. **Shared basis compilation (the fix)** — per layer/module, flatten all K deltas,
+   SVD to get a shared weight basis `{B_m}`; express each capability as sparse
+   coefficients `c_k` plus a low-rank residual `R_k`. At inference, mix in
+   **coefficient space**: `c(x) = Σ_k r_k(x)·c_k`, then compile
+   `Δ(x) = Σ_m c_m(x)·B_m + Σ_{TopT} r_k(x)·R_k`. Composition becomes coordinate
+   arithmetic instead of weight surgery.
+5. **Police** — an Accept test decides per request: serve locally (hard route / compiled
+   mix), or **fall back to the 7B**. Monitors decide when to *refresh* a package and
+   how much rank each capability deserves.
 
-**Positioning vs prior art (know what is taken):**
-- *Circuit extraction for standalone inference* exists at GPT-2 scale on toy tasks
-  (AAAI'25, arXiv:2412.15750) — masking only, no healing, no generative reasoning, no system.
-- *Attribution patching* (EAP, EAP-IG) exists as a discovery method — never used as the
-  front end of a deployment pipeline at 7B+.
-- *GraftLLM/SkillPacks* transfer capabilities as distilled parameter deltas — black-box,
-  training-heavy.
+**End goal:** most requests served by hotspot packages on the 1.5B, a small fraction
+falls back; selective accuracy ≈ 7B; latency ≪ 7B.
 
-**Our claimed novelty:**
-1. First causal (attribution-based) capability extraction at 7B+ on **generative reasoning**
-   (GSM8K, MBPP), with physical repacking (dense smaller model, real speedup).
-2. **Carve-then-heal**: healing a carved sub-network with teacher activation matching on
-   *unlabeled* domain prompts — vs training a foreign student (distillation) or not healing
-   at all (circuit extraction). Hypothesis: same-geometry initialization makes healing
-   converge orders of magnitude cheaper than distillation.
-3. **Capability-as-object**: fidelity certificate + out-of-circuit detection + escalation
-   valve + delta delivery. This is the IDN abstraction, and it is indifferent to how well
-   any single capability carves.
-
-**Either outcome publishes:** if reasoning carves to ≤50% with ≤2pt fidelity loss, we have
-the method paper. If reasoning refuses to carve below 80%, the **extractability spectrum**
-across the 6 capabilities (classification carves, reasoning doesn't, and the mechanistic
-reason why) is itself the finding, and IDN falls back to delivering larger-but-certified
-artifacts.
-
-**Flagship tasks:** GSM8K (math reasoning), MBPP (code generation) — hardest cases.
-**Sanity tasks:** SST-2, CoLA — where carving should clearly work; use them to debug the
-pipeline before touching the flagships.
+**Why this is not "just LoRA fine-tuning":** the deliverable is not K adapters but a
+**capability cache** — discovered regions, routing boundaries, a shared coordinate
+system that makes capabilities composable, selective-risk guarantees, and a fallback +
+refresh loop. Fine-tuning is one stage of a delivery system (see PPT outline Slide 6
+comparison table).
 
 ---
 
-## 1. The core research questions
+## 1. Formal objective (from the PPT outline)
+
+Not global imitation `F_θ0(x) ≈ F_T(x) ∀x`, but **local conditional approximation**:
 
 ```
-Given:
-  - Teacher F_T (Qwen2.5-7B-Instruct) with strong performance on capability c
-  - Unlabeled domain prompts X_c (no gold labels required)
-  - Edge constraints: memory < M_edge, latency < L_edge
+F_{θ0+Δ(x)}(x) ≈ F_T(x)   for x ∈ ∪_k D_k  (trusted regions)
 
-RQ1 (Locate):   Does capability c correspond to a sparse causal sub-graph of F_T?
-                Measure: attribution mass concentration; faithfulness of top-k% sub-graph.
-
-RQ2 (Carve):    Can the sub-graph be physically repacked into a dense model C_c with
-                size(C_c) ≤ ρ · size(F_T) for ρ ∈ {0.3, 0.5, 0.7}?
-
-RQ3 (Heal):     Can teacher-activation matching on X_c restore C_c to
-                M_c(C_c) ≥ M_c(F_T) − ε at a training cost ≪ distilling a foreign
-                student to the same quality?
-
-RQ4 (Certify):  Can we attach a per-artifact fidelity certificate and a per-query
-                out-of-circuit detector such that (edge answers) ∪ (escalated answers)
-                matches teacher accuracy?
-
-RQ5 (Spectrum): How does extractability (min ρ at fixed ε) vary across the 6
-                capabilities, and does it correlate with the representation-space
-                clustering we already measured?
+minimize   E[Cost(ρ(x), x)]                     (routing policy ρ)
+subject to R(F_local | Accept) − R(F_T | Accept) ≤ ε      (selective risk)
+           P(Accept = 1) ≥ γ                              (coverage)
+           latency/memory ≤ edge budget
 ```
 
-**V3 success = concrete answers to RQ1–RQ4 on GSM8K + MBPP, and the RQ5 spectrum table.**
+**Primary metrics:** SelectiveRisk, Coverage (= edge hit rate), fallback ratio,
+end-to-end accuracy vs 7B, p50/p95 latency, adapter compile/switch time.
 
 ---
 
-## 2. The pipeline — five stages, each a module with a contract
-
-### 2.1 Stage LOCATE — causal attribution of the capability sub-graph
-
-**Goal:** a causal importance score for every prunable unit of the teacher, per capability.
-
-**Prunable unit granularity (structured, so carving is physically repackable):**
-- attention heads (respecting Qwen2.5 **GQA**: KV heads are shared — prune query heads
-  freely, prune a KV head only when all its group's query heads are pruned)
-- FFN intermediate channels (rows of `gate_proj`/`up_proj`, columns of `down_proj`)
-- whole layers (as a coarse fallback and for comparison with V2-style layer pruning)
-
-**Method (in order of preference; implement 1 first, 2 as upgrade):**
-1. **Gradient×activation attribution (EAP-style first-order):** for each unit u,
-   score(u) = |Σ_x ∂L_c/∂a_u · a_u| where L_c is the task loss on the answer tokens
-   (teacher-forced) and a_u the unit's activation. One forward+backward per example;
-   200–500 examples per capability. Cheap enough for the 3090 with batch 1 + bf16 +
-   gradient checkpointing; use H100 if OOM.
-2. **EAP-IG (integrated gradients over a corruption path):** interpolate between clean
-   embeddings and corrupted embeddings (shuffled/other-capability prompt) in m=5 steps;
-   more faithful, ~5× cost.
-3. **Validation on a subsample — activation patching (ground truth):** for the top-N and
-   a random-N units, zero/mean-ablate and measure metric drop on 50 examples. Report
-   rank correlation between attribution scores and ablation impact. This is the evidence
-   that LOCATE is causal, not correlational (the key upgrade over the existing
-   `visualize-activations`, which stays as exploratory evidence).
-
-**Outputs:**
-- `artifacts/carving/{capability}/locate/scores.safetensors` — per-unit scores
-- `locate/report.json` — concentration stats (Gini/top-k% mass), ablation-validation
-  rank correlation, config (n examples, method, seed)
-
-**Modules:**
-- `src/idn/extraction/units.py` — enumerate prunable units for a loaded model; GQA-aware
-  head grouping; maps unit ↔ weight slices. **Everything else depends on this; write it
-  first, with tests.**
-- `src/idn/extraction/locate.py` — hooks, attribution passes, score aggregation
-- `src/idn/extraction/ablate.py` — patching/ablation validation harness
-
-### 2.2 Stage CARVE — threshold and physically repack
-
-**Goal:** a dense, smaller, standalone HF-loadable model containing only the sub-graph.
+## 2. Stage SPECIALIZE — per-capability LoRA + accuracy table
 
 **Method:**
-1. Given scores + keep-ratio ρ (per unit type or global), select kept units.
-   Enforce structural floors: ≥1 query head group per layer or drop the whole layer;
-   FFN floor (e.g. keep ≥12.5% channels) or drop the layer's MLP.
-2. **Repack**: slice q/k/v/o projections to kept heads (GQA-consistent), slice FFN
-   matrices to kept channels, drop removed layers from the module list. Emit a new
-   `config.json` (per-layer head counts / intermediate sizes need a small custom
-   modeling wrapper — see `pruned_qwen.py`) + `safetensors`.
-3. Record a **carve manifest**: exact unit ids kept, hash of teacher weights, ρ,
-   scores version. This is what makes delta delivery and reproducibility work.
+1. For each capability `k` ∈ {cola, sst2, squad, gsm8k, cnn_dailymail, mbpp}:
+   train LoRA `Δ_k` on the frozen 1.5B base using the capability's train split.
+   - v0 supervision: gold labels (simplest, data already local).
+   - v1 upgrade (optional): teacher distillation — SFT on `F_T(x_i)` outputs
+     (PPT §3.2), which is the IDN-native supervision (no labels needed).
+2. All adapters start from the SAME `θ0` and the SAME target modules — this is a hard
+   requirement for stage 4 (deltas must be comparable coordinates).
+   - Default config: rank r=16, α=32, dropout 0.05, targets = all attention
+     projections + MLP (`q,k,v,o,gate,up,down`); bf16; 2–3 epochs.
+3. Evaluate each `θ0+Δ_k` on its capability via the existing `idn eval --adapter`.
 
-**Outputs:** `artifacts/carving/{capability}/carve_r{rho}/` — model dir + `manifest.json`.
+**Deliverable — the V4 anchor table (fill per capability):**
 
-**Modules:**
-- `src/idn/extraction/carve.py` — selection + repacking
-- `src/idn/models/pruned_qwen.py` — modeling wrapper that loads heterogeneous per-layer
-  shapes (subclass Qwen2 modeling with per-layer head/channel counts from config)
-- Immediately evaluable with the existing `idn eval` via a new `--artifact` flag.
+| capability | 7B | 1.5B base | 1.5B+LoRA_k | gap closed |
+|---|---|---|---|---|
+| gsm8k | 0.873 | 0.688 | ? | ? |
+| ...   | ...   | ...   | ? | ? |
 
-**Expected (hypotheses to test, not promises):** carved-unhealed quality drops sharply
-below ρ≈0.7; that drop is what HEAL must recover.
-
-### 2.3 Stage HEAL — teacher-activation self-supervised repair
-
-**Goal:** recover teacher-level in-domain quality without labeled data or long training.
-
-**Method:**
-1. Corpus: unlabeled domain prompts (the capability's train split *inputs only*, plus
-   optionally teacher-generated prompts). **No gold labels anywhere in the loss.**
-2. Loss = α·KL(student logits ‖ teacher logits on teacher-forced teacher outputs)
-   + β·Σ_l MSE(student hidden_l, teacher hidden_l) over kept layers (project/align via
-   the carve manifest's index maps; hidden dim is unchanged — only heads/channels went
-   away, so residual stream aligns 1:1; for dropped layers match the next kept layer).
-3. Optimizer scope (cheapest that works, escalate in order): (a) LoRA on kept projections,
-   (b) only the seams (projections adjacent to removed units), (c) full carved model.
-4. Budget cap: ≤ 2k steps, batch ≤ 8, bf16. Teacher runs inference-only (no grad) —
-   7B teacher + ≤0.7·7B student fits the H100; on the 3090 precompute teacher
-   logits/hiddens to disk for the corpus and train student-only.
-5. **Efficiency claim experiment (RQ3):** matched-budget comparison — same loss, same
-   corpus, same steps, applied to (i) carved sub-model init vs (ii) foreign 1.5B student.
-   Plot quality vs training FLOPs. This chart is the core evidence for novelty claim #2.
-
-**Outputs:** `artifacts/carving/{capability}/heal_r{rho}/` — healed weights (or adapter)
-+ `training_log.json`.
+Also record **cross-capability quality**: `θ0+Δ_k` evaluated on capability `j≠k`
+(6×6 matrix). This measures interference and later justifies routing.
 
 **Modules:**
-- `src/idn/extraction/heal.py` — activation-matching trainer (plain torch loop or HF
-  Trainer; must run on py3.8/torch 2.0 constraints below)
-- `src/idn/extraction/teacher_cache.py` — precompute + memory-map teacher logits/hiddens
+- `src/idn/training/train_lora.py` — SFT trainer (peft 0.13.2, trl 0.11.4 available);
+  reads capability YAML; saves adapter + `train_meta.json` (base hash, rank, targets,
+  seed). Wire the existing `train-lora` CLI stub to it.
+- Rank sweep support: `--rank {4,8,16,32,64}` (used by stage 6's budget policy).
 
-### 2.4 Stage CERTIFY — fidelity certificate + out-of-circuit detection
+**Hardware:** 1.5B LoRA training fits the 3090 easily; 7B is inference-only (teacher
+outputs + eval). H100 for sweeps.
 
-**Goal:** turn "usually as good" into a measurable, shippable guarantee.
+---
 
-**Certificate (per artifact, computed once):**
-- `agreement`: task-metric agreement with teacher on a held-out probe set (≥300 examples)
-  — both absolute metric and per-example match rate
-- `output_fidelity`: mean KL(student‖teacher) on probe outputs
-- `faithfulness`: cosine similarity of intermediate hidden states on kept layers
-  (does it reproduce the computation, not just the answers?)
-- `scope`: embedding-space description of D_c (centroid + covariance of probe prompts,
-  reusing the TF-IDF/embedding machinery in `analysis/embedding_viz.py`)
+## 3. Stage ROUTE — query-only routing space
 
-**Per-query out-of-circuit detector (runtime, cheap):**
-- Mahalanobis distance of the query's pooled hidden state (early kept layer) to the
-  D_c scope distribution; threshold calibrated so that in-domain FPR ≤ 5%.
-- Optional second signal: student's own answer-token entropy.
-- Decision: serve locally / **escalate to origin**. Escalation is the safety valve backing
-  the certificate — not the core design. Report: end-to-end accuracy of
-  (served ∪ escalated) vs teacher, and escalation rate (the "cache miss rate" of IDN).
+**Method (PPT Slide 2):**
+1. Representation `h(x) = ψ(x)`: mean-pooled last-hidden-state of the **1.5B base**
+   over prompt tokens (query-only; no teacher call; reuse
+   `analysis/embedding_viz.py` sampling machinery, but ψ must be the model embedding,
+   not TF-IDF — the router runs at the edge with the model already loaded).
+2. Fit PCA on training-split representations of all capabilities:
+   `z = P_m^T (h − h̄)`, m ≈ 32–64.
+3. Per capability: centroid `μ_k`, covariance `Σ_k` (shrinkage-regularized),
+   Mahalanobis `d_k(x)`, soft weights `r_k(x) = softmax(−d_k(x)/T)`.
+4. Router health metrics: routing accuracy on held-out eval splits (argmax_k r_k vs
+   true capability), coverage/OOD rejection on out-of-domain probes (e.g. shuffled
+   text, other-language prompts).
 
 **Modules:**
-- `src/idn/extraction/certify.py` — certificate computation, probe-set management
-- `src/idn/serving/gate.py` — runtime detector + escalation decision (pure function;
-  actual serving loop can stay offline/simulated in V3)
+- `src/idn/routing/space.py` — fit/save/load routing space
+  (`P_m, h̄, {μ_k, Σ_k}, T`) → `artifacts/routing/space.npz`
+- `src/idn/routing/router.py` — `route(x) → {r_k}, d_k, entropy H(r)`; pure numpy at
+  inference.
 
-### 2.5 Stage DELIVER — capability packaging (the IDN object)
-
-**Goal:** the artifact + metadata as a self-contained deployable unit.
-
-**CapabilityPackage layout:**
-```
-package/
-  descriptor.json      # name, task, quality (certificate), latency, resource, lineage,
-                       # scope, escalation policy — the paper's capability descriptor C
-  manifest.json        # carve manifest (units kept, teacher hash, rho)
-  weights/             # EITHER full carved+healed weights
-  delta/               # OR mask + healed-weight diff vs the shared teacher base
-                       # (edge nodes holding the base download only the delta)
-```
-- `src/idn/package/builder.py` — build/package/validate; size accounting for full vs delta
-- Delta mode is the CDN story: incremental delivery of a capability ≈ size of healed
-  diffs (target: ≤2GB), not 14GB.
+*Gate: routing accuracy ≥ 0.9 on held-out splits (clustering evidence says this is
+attainable); report the confusion matrix.*
 
 ---
 
-## 3. Experimental design
+## 4. Stage MIX-NAIVE — weighted LoRA merge (the documented negative result)
 
-**Per capability c ∈ {SST-2, CoLA (sanity) → GSM8K, MBPP (flagship) → SQuAD, CNN/DM}:**
+**Method (PPT mode B):** `Δ(x) = Σ_{k∈TopT} r_k(x)·Δ_k` merged in weight space
+(per-module: sum of `B_k A_k` products scaled by r_k). T ∈ {1 (=hard route), 2, 3}.
 
-**Baselines (V2 techniques, demoted; implement only the cheap ones):**
-1. Full 7B teacher bf16 — quality bar (GSM8K already measured: 0.873)
-2. 1.5B base — floor (GSM8K: 0.688)
-3. 1.5B distilled with the SAME heal loss + budget — the critical comparison for RQ3
-4. Magnitude-pruned 7B at matching ρ (same repacker, magnitude scores instead of causal)
-   — isolates the value of LOCATE
-5. Random-carve at matching ρ — sanity control
-6. (optional) int4 GPTQ 7B — the pure-quantization point on the frontier
+**Measure:**
+- Quality per capability under T=2,3 vs hard route (T=1).
+- **Conflict diagnostics** (PPT §6.3): pairwise `cos(Δ_i, Δ_j)` and sign-conflict rate
+  per module — the quantitative story for *why* naive mixing fails.
 
-**Main sweep:** ρ ∈ {0.3, 0.5, 0.7} × {unhealed, healed}. 6 artifacts per capability.
+**Modules:**
+- `src/idn/compose/naive_mix.py` — materialize merged ΔW from multiple adapters +
+  weights; apply to base for eval.
+- `src/idn/compose/conflict.py` — cosine/sign-conflict metrics between adapters.
 
-**Metrics per artifact:** capability metric, certificate fields, disk GB, VRAM GB,
-p50/p95 latency + throughput (existing eval runner already logs latency), heal cost
-(FLOPs, wall-clock, steps).
-
-**Headline figures:**
-1. **Frontier plot** per flagship: size vs metric; causal-carve should dominate
-   magnitude/random at equal ρ, and healed-carve should reach teacher−ε.
-2. **Heal-efficiency plot**: quality vs training budget, carved-init vs foreign-1.5B.
-3. **Extractability spectrum table**: min ρ at ε per capability + attribution
-   concentration + clustering separability → the RQ5 correlation.
-4. **End-to-end IDN row**: edge artifact + gate + escalation → accuracy = teacher±0,
-   escalation rate e%, effective throughput gain.
+*Expected outcome: T≥2 underperforms hard routing. This is a required experiment, not
+a detour — it isolates the contribution of stage 5.*
 
 ---
 
-## 4. Environment
+## 5. Stage BASIS — shared weight basis, coefficients, residual (the core)
 
-**Local (dev + LOCATE + CARVE + small heals):**
-- 1× RTX 3090 (24 GB).
-- Envs: `control` conda env (`/home/sig/anaconda3/envs/control/bin/python`, py3.8.5,
-  torch 2.0.0+cu117, transformers 4.46.3, peft 0.13.2) and `.venv_qwen35` (used by
-  `scripts/cmd.sh`). Verify which env runs before writing training code; keep the
-  trainer to plain-torch features available in torch 2.0.
-- **Dtype rule:** bf16 or fp32 only (fp16 NaNs on this stack).
-- 7B backward passes on 24GB: batch 1, grad checkpointing, no optimizer states needed
-  for LOCATE (grads w.r.t. activations only, discard param grads).
+**Decomposition (PPT Slide 4; done per layer `l`, per target module):**
+1. Materialize dense deltas `ΔW_{k,l} = B_k A_k` for all K capabilities.
+2. Flatten `a_{k,l} = vec(ΔW_{k,l})`; stack to `A_l ∈ R^{K×d}`.
+3. SVD on centered stack: `A_l − Ā_l = U Σ V^T`; shared basis
+   `B_{l,m} = unvec(V[:,m])`, m = 1..M_l. Store basis in low-rank factored form when
+   memory demands (each B_{l,m} is same shape as ΔW; keep M_l small, e.g. 4–8, and/or
+   store SVD-factored).
+4. Coefficients: `c_k = argmin_c Σ_l ‖ΔW_{k,l} − Σ_m c_{k,l,m} B_{l,m}‖_F² + λ‖c‖_1`
+   (lasso per layer; K is tiny so this is cheap).
+5. Residual: `R_{k,l} = ΔW_{k,l} − Σ_m c_{k,l,m} B_{l,m}`, compressed low-rank via SVD
+   to rank r_res (e.g. 4–8); optionally refined on task loss (PPT §4.5, v1 upgrade).
 
-**Cloud (full heals + teacher-cache generation + sweeps):**
-- `ssh wanghl@172.22.11.235`, 1× H100 80GB.
+**Reconstruction sanity (must-pass test):** with M_l = K−1 + residual, the compiled
+`Δ_k` must reproduce single-capability LoRA quality within noise. Report quality vs
+(M_l, r_res) — the compression/quality frontier of the basis itself.
 
-**Models (relative to machine `model_dir`, loaded from disk):**
-- Teacher: `Qwen2.5-7B-Instruct`  ·  Reference student: `Qwen2.5-1.5B-Instruct`
-
-**Datasets:** the 6 capabilities under `configs/capabilities/*.yaml` (already working).
-
----
-
-## 5. Repository structure (additions; V1 infra is kept as-is)
-
+**Inference-time compilation (PPT mode C):**
 ```
-src/idn/extraction/            # NEW — the carving pipeline
-  __init__.py
-  units.py                     # prunable-unit enumeration, GQA groups, unit↔slice maps
-  locate.py                    # grad×act and EAP-IG attribution
-  ablate.py                    # patching validation of scores
-  carve.py                     # selection + physical repacking
-  heal.py                      # activation-matching trainer
-  teacher_cache.py             # precompute teacher logits/hiddens to disk
-  certify.py                   # certificate + probe sets
-src/idn/models/
-  pruned_qwen.py               # loads per-layer heterogeneous head/channel counts
-src/idn/serving/
-  gate.py                      # out-of-circuit detector + escalation decision
-src/idn/package/
-  builder.py                   # CapabilityPackage build/validate, full vs delta
-configs/carving/
-  locate.yaml  carve.yaml  heal.yaml  certify.yaml
-artifacts/carving/{capability}/{locate,carve_r*,heal_r*,certificate,package}/
-tests/
-  test_units.py                # slice maps round-trip; GQA constraints
-  test_carve_repack.py         # carved model loads, forward-pass parity when rho=1.0
-  test_heal_loss.py            # loss decreases on tiny fixture
-  test_certify.py              # certificate fields computed; gate thresholding
+c_m(x) = Σ_{k∈TopT} r_k(x)·c_{k,m}      # mix coordinates, not weights
+ĉ(x)   = TopS(c(x))                      # hard-sparsify
+R(x)   = Σ_{k∈TopT} r_k(x)·R_k           # residual only over TopT
+Δ(x)   = Σ_m ĉ_m(x)·B_m + R(x)
+y      = F_{θ0+Δ(x)}(x)
 ```
 
-**Critical invariant test:** `carve(rho=1.0)` must reproduce the teacher's logits exactly
-(repacking is a no-op at full keep). This validates `units.py` + `carve.py` end to end
-before any science happens.
+**A hotspot capability package is now:**
+```
+C_k = ⟨ μ_k, Σ_k, τ_k,            # routing boundary
+        c_k, R_k,                  # coordinates in shared basis + residual
+        V_k, Π_k,                  # verifier, fallback policy
+        lineage ⟩                  # base hash, teacher version, train date
+```
+The shared basis `{B_m}` ships once per edge node (like a shared base layer);
+per-capability delivery = coefficients (KB) + residual (MB). **This is the CDN story:
+delivering a new capability to a node that already holds the basis costs megabytes.**
+
+**Modules:**
+- `src/idn/compose/basis.py` — build basis from adapter library; save
+  `artifacts/basis/{basis.safetensors, coeffs.json, residuals.safetensors}`
+- `src/idn/compose/compile.py` — `compile(r, TopT, TopS) → Δ(x)` applied as a
+  temporary adapter; must support per-request compile ≤ tens of ms (measure it)
+- `tests/test_basis_roundtrip.py` — reconstruction sanity above
+
+*Gate: basis-compiled mixing ≥ naive mixing on boundary samples AND ≈ hard route on
+pure samples. If basis ≤ naive everywhere, the decomposition or λ/M_l needs revisits.*
 
 ---
 
-## 6. CLI surface (additions)
+## 6. Stage POLICE — accept, fallback, refresh, and rank budgeting
+
+**Accept (PPT §5.2):**
+```
+Accept(x) = 1{ max_k r_k(x) ≥ τ  ∧  H(r(x)) ≤ τ_H  ∧  V(x,y) = pass }
+otherwise → fallback to F_T (7B)
+```
+- `V` per capability: format/schema check (all tasks), answer-extraction success
+  (gsm8k), code executes + smoke asserts (mbpp), length/overlap sanity (cnn_dailymail),
+  label-in-vocab (cola/sst2, squad span plausibility). Cheap, rule-based first.
+- Calibrate `τ, τ_H` on a validation stream to hit target coverage γ while keeping
+  SelectiveRisk ≤ ε (sweep the operating curve, pick per deployment).
+
+**Decision ladder per request:** hard route (max r_k dominant) → basis-compiled mix
+(boundary: top-2 close) → fallback (low confidence / high entropy / verifier fail).
+
+**Refresh policy (when to update a package):**
+- Drift monitor: rolling mean of `min_k d_k(x)` and coverage; sustained rise → routing
+  space refit (cheap) or package retrain.
+- Quality monitor: verifier failure rate per capability; sampled shadow audits
+  (send p% of accepted requests to 7B asynchronously, compare) → if agreement drops
+  below certificate value, mark package stale and retrain from fresh teacher outputs.
+- Teacher upgrade: lineage.teacher_version change invalidates all packages (CDN-style
+  versioned invalidation).
+
+**Rank budgeting (每个 LoRA 用多少参数):**
+- Run the stage-2 rank sweep {4,8,16,32,64} per capability; fit quality-vs-rank curves.
+- Allocate rank ∝ marginal utility under a total parameter budget (knapsack over the
+  measured curves). Hypothesis: classification (cola/sst2) saturates at r≤8; gsm8k/mbpp
+  need r≥32. The resulting allocation table is a paper-ready artifact.
+
+**Modules:**
+- `src/idn/serving/gate.py` — accept test + decision ladder (pure function)
+- `src/idn/serving/verifiers.py` — per-capability V_k
+- `src/idn/serving/monitor.py` — drift/quality counters, refresh triggers (offline
+  simulation in V4; no live serving loop required)
+- `src/idn/serving/simulate.py` — end-to-end stream simulator (see §7 E5)
+
+---
+
+## 7. Experimental design
+
+**Request stream for end-to-end tests:** interleave held-out eval examples of all 6
+capabilities (proportions ~ uniform, plus 5–10% OOD probes). Seeded, reproducible.
+
+- **E1 Specialist table:** per-capability 7B / 1.5B / 1.5B+Δ_k + 6×6 cross matrix.
+- **E2 Router:** routing accuracy, confusion, OOD rejection, coverage curve vs τ.
+- **E3 Mixing ablation (headline figure 1):** hard route vs naive TopT vs basis-compiled,
+  on (a) pure per-capability sets, (b) boundary set (samples with top-2 r_k within δ);
+  plus conflict diagnostics correlating with naive-mix drop.
+- **E4 Basis economics (headline figure 2):** quality vs (M_l, r_res, TopS); package
+  delivery size (coeffs+residual) vs full LoRA vs full model; compile-time p50/p95.
+- **E5 End-to-end IDN (headline table):** stream through the full ladder →
+  Coverage, fallback ratio, SelectiveRisk vs 7B, end-to-end accuracy
+  (edge ∪ fallback) vs 7B-only, p50/p95 latency and throughput vs 7B-only.
+  Target: accuracy ≈ 7B ± ε with the majority of requests served at the edge.
+- **E6 Rank budget:** quality-vs-rank curves + allocation table.
+
+**Baselines:** edge-only 1.5B; cloud-only 7B; single global LoRA on the union of all 6
+train sets (the "普通微调" strawman that must lose to routed specialists);
+per-capability hard route (upper anchor for mixing).
+
+---
+
+## 8. Environment
+
+- **3090 (24GB, local):** all 1.5B LoRA training, routing space, basis build, compiled
+  inference, eval of 1.5B variants. 7B eval fits in bf16 (14GB) for accuracy rows.
+- **H100 (`ssh wanghl@172.22.11.235`):** rank sweeps, teacher-distillation output
+  generation, 7B latency baselines under load.
+- Env: `control` conda env (py3.8.5, torch 2.0.0+cu117, transformers 4.46.3,
+  peft 0.13.2, trl 0.11.4). **bf16/fp32 only (fp16 NaNs).**
+- Models relative to machine `model_dir`: `Qwen2.5-7B-Instruct`, `Qwen2.5-1.5B-Instruct`.
+- Datasets: existing `configs/capabilities/*.yaml`; loaded from local disk.
+
+---
+
+## 9. Repository structure (additions)
+
+```
+src/idn/training/train_lora.py         # stage 2 (wires existing CLI stub)
+src/idn/routing/{space.py, router.py}  # stage 3
+src/idn/compose/{naive_mix.py, conflict.py, basis.py, compile.py}   # stages 4–5
+src/idn/serving/{gate.py, verifiers.py, monitor.py, simulate.py}    # stage 6
+src/idn/package/builder.py             # C_k packaging (descriptor + coeffs + residual)
+configs/lora/default.yaml              # rank/targets/epochs; per-capability overrides
+configs/routing/space.yaml             # ψ layer, PCA dim, T, shrinkage
+configs/compose/basis.yaml             # M_l, λ, r_res, TopT, TopS
+artifacts/adapters/{capability}/r{rank}/
+artifacts/routing/space.npz
+artifacts/basis/
+artifacts/packages/{capability}/
+artifacts/reports/
+tests/test_train_smoke.py              # tiny-steps LoRA run
+tests/test_router.py                   # routing accuracy on fixture embeddings
+tests/test_naive_mix.py                # merged ΔW matches manual computation
+tests/test_basis_roundtrip.py          # reconstruction sanity (§5)
+tests/test_gate.py                     # accept ladder decisions on synthetic r/H/V
+```
+
+---
+
+## 10. CLI surface (additions)
 
 ```bash
-# Stage 1: attribute
-idn locate --config configs/capabilities/gsm8k.yaml --model Qwen2.5-7B-Instruct \
-  --method gradxact --num-examples 300 --output artifacts/carving/gsm8k/locate
+idn train-lora --config configs/capabilities/gsm8k.yaml --rank 16 \
+  --output artifacts/adapters/gsm8k/r16          # stage 2 (existing stub, now real)
 
-# Validate attribution causally (subsample ablation)
-idn locate-validate --scores artifacts/carving/gsm8k/locate --top-n 50 --random-n 50
+idn fit-routing --config-dir configs/capabilities --output artifacts/routing/space.npz
+idn route --input "..." --space artifacts/routing/space.npz   # debug: prints r_k, H
 
-# Stage 2: carve + repack
-idn carve --scores artifacts/carving/gsm8k/locate --keep-ratio 0.5 \
-  --output artifacts/carving/gsm8k/carve_r0.5
+idn build-basis --adapters artifacts/adapters/*/r16 --M 6 --r-res 8 \
+  --output artifacts/basis                        # stage 5 decomposition
 
-# Stage 3: heal (teacher self-supervision, no labels)
-idn heal --carved artifacts/carving/gsm8k/carve_r0.5 --teacher Qwen2.5-7B-Instruct \
-  --config configs/carving/heal.yaml --output artifacts/carving/gsm8k/heal_r0.5
+idn eval --config configs/capabilities/gsm8k.yaml --model Qwen2.5-1.5B-Instruct \
+  --adapter artifacts/adapters/gsm8k/r16          # existing runner, unchanged
 
-# Stage 4: certify
-idn certify --artifact artifacts/carving/gsm8k/heal_r0.5 --teacher Qwen2.5-7B-Instruct \
-  --probe-size 300 --output artifacts/carving/gsm8k/certificate_r0.5.json
+idn eval-mixed --mode {hard,naive,basis} --top-t 2 --stream mixed_eval.jsonl \
+  --output artifacts/reports/e3_mixing.json       # E3
 
-# Stage 5: package
-idn package --artifact ... --certificate ... --mode delta --output .../package
+idn simulate --stream mixed_eval.jsonl --tau 0.7 --tau-h 0.9 \
+  --fallback-model Qwen2.5-7B-Instruct \
+  --output artifacts/reports/e5_end2end.json      # E5
 
-# Eval any artifact through the existing runner
-idn eval --config configs/capabilities/gsm8k.yaml --artifact artifacts/carving/gsm8k/heal_r0.5
-
-# Sweep + report
-idn sweep-carve --config configs/capabilities/gsm8k.yaml --keep-ratios 0.3,0.5,0.7 \
-  --baselines magnitude,random --output artifacts/reports/gsm8k_carving_frontier.md
+idn package --capability gsm8k --basis artifacts/basis \
+  --output artifacts/packages/gsm8k               # C_k builder
 ```
 
 ---
 
-## 7. Implementation phases
+## 11. Implementation phases
 
-**Phase 0 — infra checks (mostly done).** Eval + configs work; GSM8K baselines exist.
-Remaining: MBPP + SST-2 baselines for 7B and 1.5B. *Gate: baseline JSONs exist for the
-3 tasks used below.*
+**Phase 1 — specialists (E1).** `train_lora.py` + smoke test; train r16 LoRAs for
+cola, sst2, gsm8k first (fast tasks + one flagship); eval + cross matrix.
+*Gate: each Δ_k beats 1.5B base on its own capability; gsm8k gap to 7B measurably
+narrows. Do not proceed if LoRA training doesn't reproduce expected gains.*
 
-**Phase 1 — units + repack skeleton.** `units.py`, `carve.py`, `pruned_qwen.py`,
-`idn carve`, tests. *Gate: rho=1.0 logit-parity test passes on Qwen2.5-1.5B (cheap),
-then on 7B.*
+**Phase 2 — router (E2).** `space.py`/`router.py`, fit on all 6, held-out routing
+accuracy + OOD probes. *Gate: ≥0.9 routing accuracy.*
 
-**Phase 2 — LOCATE on SST-2 (sanity task).** `locate.py` grad×act on 1.5B first, then 7B.
-`ablate.py` validation. *Gate: attribution-vs-ablation rank correlation clearly beats
-random; carve@0.5 with causal scores beats magnitude scores on SST-2 unhealed.*
+**Phase 3 — naive mixing (E3a).** `naive_mix.py` + `conflict.py`; hard vs T=2,3 on
+pure + boundary sets. *Gate: results + conflict diagnostics recorded (negative result
+expected and acceptable).*
 
-**Phase 3 — CARVE+eval GSM8K.** Run locate+carve on 7B/GSM8K at ρ∈{0.3,0.5,0.7};
-eval unhealed. *Gate: the degradation curve exists — this is RQ1/RQ2 evidence
-regardless of how good it looks.*
+**Phase 4 — shared basis (E3b, E4).** `basis.py`/`compile.py` + roundtrip test; rerun
+E3 with basis compilation; measure compile latency and package sizes.
+*Gate: basis ≥ naive on boundary samples; roundtrip sanity passes.*
 
-**Phase 4 — HEAL.** `teacher_cache.py` + `heal.py`; heal GSM8K@0.5 on H100.
-Matched-budget foreign-1.5B comparison. *Gate: healed@0.5 within 5pts of 0.873 AND
-carved-init beats foreign-init at equal budget — if the first fails but the second
-holds, raise ρ and continue; if both fail, pivot to the spectrum finding (see §9).*
+**Phase 5 — gate + end-to-end (E5).** `gate.py`/`verifiers.py`/`simulate.py`; calibrate
+τ, τ_H; run the mixed stream with 7B fallback.
+*Gate: end-to-end accuracy ≥ 7B − ε with coverage ≥ γ (set ε per capability YAML,
+γ target 0.7–0.8 initially).*
 
-**Phase 5 — CERTIFY + gate.** `certify.py`, `serving/gate.py`; end-to-end
-(edge+escalation) accuracy on a mixed in/out-of-domain query stream.
-*Gate: combined accuracy ≥ teacher − 1pt with escalation rate reported.*
-
-**Phase 6 — MBPP + baselines + frontier.** Repeat 3–5 on MBPP; run magnitude/random/
-1.5B-distill baselines; generate the three headline figures. *Gate: figures exist.*
-
-**Phase 7 — spectrum + packaging.** Remaining capabilities at coarse settings for the
-RQ5 table; `package/builder.py` with delta mode; final report.
-
-**Do not build all stages up front.** Phases 1–2 on the sanity task prove the machinery;
-GSM8K@ρ=0.5 healed is the single most important experiment in the plan.
+**Phase 6 — full 6 capabilities + budget + packaging (E6).** Remaining LoRAs
+(squad, cnn_dailymail, mbpp), rank sweep + allocation, monitor/refresh simulation,
+`package/builder.py`, final report with headline figures.
 
 ---
 
-## 8. V3 acceptance criteria
+## 12. Acceptance criteria
 
-1. **rho=1.0 parity test green** (repacking correctness) + unit tests green.
-2. **LOCATE validated causally** on ≥2 capabilities (rank correlation vs ablation).
-3. **Frontier plots** for GSM8K + MBPP: causal carve vs magnitude vs random vs 1.5B-distill,
-   unhealed and healed.
-4. **Heal-efficiency plot** (carved-init vs foreign-init at matched budget) for ≥1 flagship.
-5. **≥1 certified artifact** per flagship: ≤8GB VRAM, certificate attached, end-to-end
-   (with escalation) accuracy ≥ teacher − ε (ε from capability YAML).
-6. **Extractability spectrum table** across ≥4 capabilities.
-7. **≥1 CapabilityPackage in delta mode** with measured delivery size.
-
----
-
-## 9. Risks and honest failure modes
-
-- **Reasoning is diffuse (the central gamble).** GSM8K may not carve below ρ≈0.8.
-  → The spectrum result is the publication then: which capabilities localize, which
-  don't, and the mechanistic correlate (attribution concentration, clustering
-  separability). IDN's abstraction is indifferent to ρ; a certified 0.8-carve is still
-  a smaller, faster, deliverable object.
-- **Attribution noise at 7B.** First-order EAP is known to be imperfect. → Always
-  validate with ablation subsamples; upgrade to EAP-IG; ensemble over seeds/examples.
-- **GQA structural coupling limits head pruning.** → `units.py` treats a KV group as
-  partially prunable (query heads) and fully prunable (whole group); measure both.
-- **Heal changes the computation instead of repairing it** (student drifts from the
-  circuit, faithfulness drops while accuracy holds). → That weakens the "extraction"
-  claim; report faithfulness alongside accuracy; keep β (hidden-matching) high enough.
-- **torch 2.0/py3.8 limits** (no modern quant libs, older HF). → The core pipeline needs
-  only plain torch + transformers. Quant baseline is optional; run modern-lib steps on
-  the H100 env if needed.
-- **Latency wins need dense repacking, not masks.** → That's why CARVE repacks physically;
-  measure real p50/p95 with the existing runner, and report honestly if per-layer
-  heterogeneity hurts kernel efficiency.
+1. **E1 table complete** for all 6 capabilities (+ cross matrix); every specialist
+   beats base on its own task.
+2. **Router ≥0.9** held-out routing accuracy with calibrated OOD rejection.
+3. **The three-way mixing comparison exists** (hard / naive / basis) with conflict
+   diagnostics; basis-compiled beats naive on boundary samples.
+4. **Basis roundtrip test green;** package delivery size and compile time reported.
+5. **End-to-end stream result:** accuracy ≥ 7B − ε, coverage ≥ γ, fallback ratio and
+   p50/p95 latency reported; latency of edge-served requests ≪ 7B baseline.
+6. **Rank-budget allocation table** from measured quality-vs-rank curves.
+7. **≥1 packaged C_k** (descriptor + coefficients + residual + verifier + lineage).
+8. Tests green: train smoke, router, naive-mix correctness, basis roundtrip, gate.
 
 ---
 
-## 10. Connection to the IDN paper architecture
+## 13. Risks and honest failure modes
 
-The pipeline instantiates the paper's **Intelligence Capability Abstraction**:
-
-```
-C = ⟨name, task, quality, latency, security, resource, lineage, scope, escalation⟩
-```
-
-- **quality** = the CERTIFY certificate (agreement, output_fidelity, faithfulness)
-- **scope** = the D_c descriptor used by the gate — this is what makes routing
-  *capability-aware* rather than load-aware
-- **resource/lineage** = carve manifest + teacher hash → content-addressed artifacts,
-  **delta delivery**, and versioned invalidation when the origin model updates
-- **escalation** = the origin fallback policy — IDN's "cache miss" semantics
-
-Deployment Controller places packages; Service Router uses `scope` + gate signals;
-State/Cache Manager handles delta distribution and invalidation. V4 adds composition
-(union of carve masks / adapter mixing for multi-capability nodes) and online routing.
+- **Specialist LoRAs may not close enough of the 7B gap on gsm8k/mbpp** (1.5B capacity
+  ceiling). → Coverage/γ absorbs this: route hard cases to fallback; report the
+  achievable (coverage, selective-risk) frontier honestly. If gsm8k specialist gains
+  are negligible, raise its fallback share and say so.
+- **Routing space built from 6 benchmark datasets ≠ real traffic.** Clusters here are
+  artificially clean. → Include OOD probes + boundary-sample analysis; frame results
+  as "given a capability taxonomy"; real-traffic discovery is future work (PPT §2.4
+  extractability checks are the hook).
+- **Basis from only K=6 deltas is thin** — SVD over 6 vectors gives ≤5 informative
+  directions above the mean. → That may already suffice (report spectrum); if not,
+  enrich the library (per-rank variants, sub-capability splits, e.g. per-cluster within
+  a dataset) to make the basis meaningful. This is a known scientific risk of the
+  decomposition story.
+- **Naive mixing might accidentally work** (LoRAs from the same θ0 are sometimes
+  benignly mergeable). → Also fine: then basis compilation's claim shifts to delivery
+  economics (KB-scale coefficients) + stability at larger K; measure both.
+- **Compile-per-request overhead could eat the latency win.** → Cache compiled Δ for
+  hard-route requests (only boundary samples need per-request compilation); measure
+  compile p95 explicitly (E4).
+- **Related work adjacency:** LoRAHub / AdapterFusion / model-soup lines compose
+  adapters; TIES/DARE address sign conflicts. Our differentiators: query-only
+  Mahalanobis routing + shared-basis *compilation* + selective-risk/fallback system +
+  package delivery economics. Cite and compare (LoRAHub-style composition is already
+  in the PPT baseline list); do not claim adapter composition per se as novel.
 
 ---
 
-## 11. First concrete actions for the coding agent
+## 14. Connection to the IDN paper architecture
 
-1. **Finish Phase 0:** run `idn eval` for 7B and 1.5B on MBPP and SST-2 (limits per YAML).
-2. **Write `units.py` + tests** against Qwen2.5-1.5B (same architecture family as 7B,
-   cheap to iterate): unit enumeration, GQA groups, unit↔slice maps.
-3. **Write `carve.py` + `pruned_qwen.py`** and make the **rho=1.0 logit-parity test** pass.
-4. **Implement `locate.py` (grad×act)** and run on SST-2/1.5B; validate with `ablate.py`.
-5. **Only then** touch the 7B and GSM8K. Do not implement HEAL until Phase 3's
-   degradation curve exists — its shape determines how much healing capacity to build.
+- **Hotspot capability package `C_k`** = the paper's capability descriptor: routing
+  boundary (μ_k, Σ_k, τ_k), executor coordinates (c_k, R_k), verifier V_k, fallback
+  policy Π_k, lineage.
+- **Shared basis {B_m}** = the node-resident substrate; per-capability delivery is
+  KB–MB scale → CDN-style incremental distribution, content-addressed by lineage,
+  invalidated on teacher upgrade.
+- **Gate + monitors** = Service Router (capability-aware routing) + State/Cache
+  Manager (refresh/invalidation); fallback = origin pull.
+- **Selective risk + coverage** = the SLA language of intelligence delivery: users buy
+  "teacher-equivalent accuracy on accepted requests, ≥γ acceptance," not "a smaller
+  model that's usually okay."
+
+V5 extensions: real-traffic region discovery (unsupervised D_k), online coefficient
+adaptation, multi-node placement optimization.
+
+---
+
+## 15. First concrete actions for the coding agent
+
+1. **Implement `train_lora.py`** + smoke test; wire the `train-lora` CLI stub.
+2. **Train 3 specialists** (cola, sst2, gsm8k; r16) and produce the E1 rows including
+   the cross matrix — confirm specialists work before any composition code.
+3. **Build the router** (`space.py`, `router.py`) with ψ = 1.5B pooled hidden states;
+   verify ≥0.9 routing accuracy.
+4. **Naive mixing + conflict diagnostics** (E3a), then **basis decomposition +
+   roundtrip test + basis mixing** (E3b).
+5. **Gate + simulator** for the end-to-end stream (E5) with 7B fallback.
+6. Only then: remaining 3 capabilities, rank sweeps, packaging, final report.
