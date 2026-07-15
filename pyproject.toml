@@ -9,7 +9,18 @@ description = "IDN capability extraction experiment pipeline"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
+  "accelerate>=0.21.0",
+  "datasets>=2.0",
+  "matplotlib>=3.5",
+  "numpy>=1.23,<2",
+  "peft==0.8.2",
+  "pyarrow>=10.0",
   "PyYAML>=6.0",
+  "safetensors>=0.4",
+  "scikit-learn>=1.1",
+  "tokenizers==0.19.1",
+  "torch==2.4.1",
+  "transformers==4.43.1",
 ]
 
 [project.optional-dependencies]
