@@ -784,6 +784,11 @@ def cmd_train_lora(args: argparse.Namespace) -> int:
         rank=rank,
     )
 
+    if output_path.exists() and not args.override:
+        print("LoRA adapter already exists; skipping training.")
+        print("adapter: {0}".format(output_path))
+        return 0
+
     print("Starting LoRA specialist training.")
     print("capability: {0}".format(resolved.capability.id))
     print("split: {0}".format(split))

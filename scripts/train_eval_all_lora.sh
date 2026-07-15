@@ -4,7 +4,7 @@ set -euo pipefail
 
 export PYTHONPATH=src
 PYTHON=python
-MACHINE=3090
+MACHINE=h100
 MODEL=Qwen2.5-1.5B-Instruct
 
 $PYTHON -m idn.cli --machine $MACHINE train-lora \
