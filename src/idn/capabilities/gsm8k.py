@@ -51,6 +51,7 @@ class GSM8KSpec:
                     id=str(row.get("idx", index)),
                     prompt_inputs={"question": row["question"]},
                     reference=parse_gsm8k_answer(row["answer"]),
+                    gold_target=str(row["answer"]),
                 )
             )
             if limit is not None and len(examples) >= limit:
@@ -83,6 +84,8 @@ class GSM8KSpec:
             parsed = self.parse_prediction(teacher_text)
             if parsed is not None:
                 return teacher_text.strip()
+        if ex.gold_target:
+            return ex.gold_target.strip()
         return "#### {0}".format(ex.reference)
 
     def metric(self, preds: List[Any], refs: List[Any]) -> Dict[str, float]:
@@ -129,4 +132,3 @@ def normalize_number(value: Any) -> Optional[str]:
     if normalized == "-0":
         normalized = "0"
     return normalized
-

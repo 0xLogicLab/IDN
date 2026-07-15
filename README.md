@@ -1,6 +1,6 @@
 # IDN Capability Extraction
 
-This repository implements the V1 experiment pipeline described in
+This repository implements the experiment pipeline described in
 `CAPABILITY_EXTRACTION_PLAN.md`.
 
 Phase 0 provides the package skeleton, YAML config loading and machine overrides,
@@ -9,8 +9,10 @@ the capability registry, and a CLI entry point.
 ```bash
 python -m idn.cli --help
 python -m idn.cli list-capabilities
+python -m idn.cli --machine 3090 train-lora --config configs/capabilities/cola.yaml --rank 16
 python -m idn.cli --machine h100 eval --config configs/capabilities/sst2.yaml --model Qwen2.5-7B-Instruct
 python -m idn.cli --machine h100 visualize-activations --model Qwen2.5-7B-Instruct --capabilities gsm8k,mbpp,cnn_dailymail
+scripts/train_eval_all_lora.sh --machine 3090
 python -m pytest
 ```
 
@@ -24,3 +26,14 @@ Face Hub.
 mean absolute hidden-state activations by layer and hidden dimension, and writes
 a self-contained HTML dashboard plus JSON and top-neuron CSV files under
 `artifacts/analysis`.
+
+`train-lora` performs gold-supervised SFT on prompt-masked targets using the
+frozen Qwen2.5-1.5B base. Defaults come from `configs/train/lora_default.yaml`;
+rank-16 adapters are written to `artifacts/adapters/{capability}/r16` with
+`train_meta.json` lineage and a step-level `training_log.json`.
+
+`scripts/train_eval_all_lora.sh` lists the train and eval commands for all six
+capabilities.
+
+The current Phase 1 measurements and gate decision are recorded in
+`artifacts/reports/phase1_specialists.json`.

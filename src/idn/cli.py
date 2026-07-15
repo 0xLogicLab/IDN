@@ -30,6 +30,12 @@ from idn.extraction.locate import LocateError, locate_qwen2_units
 from idn.eval.runner import run_eval
 from idn.registry import iter_capabilities, spec_from_config
 from idn.serving.gate import GateError, evaluate_certificate_gate
+from idn.training.train_lora import (
+    TrainLoRAError,
+    load_lora_training_defaults,
+    normalize_target_modules,
+    train_lora,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -500,10 +506,79 @@ def build_parser() -> argparse.ArgumentParser:
     gate_eval_parser.add_argument("--output", default=None)
     gate_eval_parser.set_defaults(func=cmd_gate_eval)
 
+    train_parser = subparsers.add_parser(
+        "train-lora",
+        help="Train a gold-supervised LoRA specialist for one capability.",
+    )
+    train_parser.add_argument("--config", required=True, help="Capability YAML.")
+    train_parser.add_argument(
+        "--training-config",
+        default="configs/train/lora_default.yaml",
+        help="LoRA training defaults YAML.",
+    )
+    train_parser.add_argument(
+        "--model",
+        default="Qwen2.5-1.5B-Instruct",
+        help="Base model directory relative to --model-dir or machine model_dir.",
+    )
+    train_parser.add_argument(
+        "--model-dir",
+        default=None,
+        help="Override the machine config model_dir used to resolve --model.",
+    )
+    train_parser.add_argument(
+        "--split",
+        default=None,
+        help="Dataset split to train on. Defaults to capability train_split.",
+    )
+    train_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum training examples. Use 0 for the full split.",
+    )
+    train_parser.add_argument("--output", default=None, help="Adapter output directory.")
+    train_parser.add_argument("--rank", type=int, choices=(4, 8, 16, 32, 64), default=None)
+    train_parser.add_argument("--alpha", type=int, default=None)
+    train_parser.add_argument("--dropout", type=float, default=None)
+    train_parser.add_argument(
+        "--target-modules",
+        default=None,
+        help="Comma-separated LoRA targets, or the alias qkvo/all.",
+    )
+    train_parser.add_argument("--learning-rate", type=float, default=None)
+    train_parser.add_argument("--epochs", type=int, default=None)
+    train_parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Optional optimizer-step cap, primarily for smoke runs.",
+    )
+    train_parser.add_argument("--max-length", type=int, default=None)
+    train_parser.add_argument("--batch-size", type=int, default=None)
+    train_parser.add_argument(
+        "--gradient-accumulation-steps", type=int, default=None
+    )
+    train_parser.add_argument("--warmup-ratio", type=float, default=None)
+    train_parser.add_argument("--max-grad-norm", type=float, default=None)
+    train_parser.add_argument("--dtype", default=None)
+    train_parser.add_argument("--seed", type=int, default=None)
+    train_parser.add_argument("--log-steps", type=int, default=None)
+    train_parser.add_argument(
+        "--no-gradient-checkpointing",
+        action="store_true",
+        help="Disable model gradient checkpointing.",
+    )
+    train_parser.add_argument(
+        "--override",
+        action="store_true",
+        help="Replace an existing adapter output directory.",
+    )
+    train_parser.set_defaults(func=cmd_train_lora)
+
     for name in (
         "gen-teacher",
         "build-sft",
-        "train-lora",
         "export",
         "serve",
         "report",
@@ -646,6 +721,111 @@ def cmd_not_implemented(args: argparse.Namespace) -> int:
     raise SystemExit(
         "Command '{0}' is planned but not implemented in Phase 0.".format(args.command)
     )
+
+
+def cmd_train_lora(args: argparse.Namespace) -> int:
+    resolved = load_resolved_config(Path(args.config), args.machine)
+    spec = spec_from_config(resolved.capability)
+    if spec is None:
+        raise SystemExit(
+            "Capability '{0}' is not implemented yet.".format(resolved.capability.id)
+        )
+    defaults = load_lora_training_defaults(Path(args.training_config))
+    model_base_dir = args.model_dir or resolved.machine.model_dir
+    model_path = Path(
+        resolve_relative_dir(
+            base_dir=model_base_dir,
+            relative_dir=args.model,
+            field="--model",
+        )
+    )
+    split = args.split or resolved.capability.train_split
+    limit = None if args.limit in (None, 0) else args.limit
+    rank = defaults.rank if args.rank is None else args.rank
+    alpha = defaults.alpha if args.alpha is None else args.alpha
+    dropout = defaults.dropout if args.dropout is None else args.dropout
+    target_modules = (
+        defaults.target_modules
+        if args.target_modules is None
+        else normalize_target_modules(args.target_modules)
+    )
+    learning_rate = (
+        defaults.learning_rate
+        if args.learning_rate is None
+        else args.learning_rate
+    )
+    epochs = defaults.epochs if args.epochs is None else args.epochs
+    max_length = defaults.max_length if args.max_length is None else args.max_length
+    batch_size = (
+        resolved.machine.train_batch_size
+        if args.batch_size is None
+        else args.batch_size
+    )
+    gradient_accumulation_steps = (
+        defaults.gradient_accumulation_steps
+        if args.gradient_accumulation_steps is None
+        else args.gradient_accumulation_steps
+    )
+    warmup_ratio = (
+        defaults.warmup_ratio if args.warmup_ratio is None else args.warmup_ratio
+    )
+    max_grad_norm = (
+        defaults.max_grad_norm if args.max_grad_norm is None else args.max_grad_norm
+    )
+    dtype = defaults.dtype if args.dtype is None else args.dtype
+    seed = defaults.seed if args.seed is None else args.seed
+    log_steps = defaults.log_steps if args.log_steps is None else args.log_steps
+    gradient_checkpointing = (
+        defaults.gradient_checkpointing and not args.no_gradient_checkpointing
+    )
+    output_path = Path(args.output) if args.output else default_train_lora_output_path(
+        artifact_dir=DEFAULT_ARTIFACT_DIR,
+        capability_id=resolved.capability.id,
+        rank=rank,
+    )
+
+    print("Starting LoRA specialist training.")
+    print("capability: {0}".format(resolved.capability.id))
+    print("split: {0}".format(split))
+    print("examples: {0}".format("full" if limit is None else limit))
+    print("target_source: gold")
+    print("model: {0}".format(model_path))
+    print("rank: {0}".format(rank))
+    print("target_modules: {0}".format(",".join(target_modules)))
+    print("output: {0}".format(output_path))
+    result = train_lora(
+        base_model_path=model_path,
+        spec=spec,
+        split=split,
+        output_dir=output_path,
+        limit=limit,
+        rank=rank,
+        alpha=alpha,
+        dropout=dropout,
+        target_modules=target_modules,
+        learning_rate=learning_rate,
+        scheduler=defaults.scheduler,
+        warmup_ratio=warmup_ratio,
+        epochs=epochs,
+        max_steps=args.max_steps,
+        max_length=max_length,
+        batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        max_grad_norm=max_grad_norm,
+        dtype=dtype,
+        device=resolved.machine.device,
+        local_files_only=resolved.machine.local_files_only,
+        seed=seed,
+        log_steps=log_steps,
+        gradient_checkpointing=gradient_checkpointing,
+        override=args.override,
+        progress=print_train_lora_progress,
+    )
+    print("LoRA specialist training complete.")
+    print("adapter: {0}".format(result.adapter_dir))
+    print("train_meta: {0}".format(output_path / "train_meta.json"))
+    print("training_log: {0}".format(output_path / "training_log.json"))
+    return 0
 
 
 def cmd_locate(args: argparse.Namespace) -> int:
@@ -1082,6 +1262,14 @@ def default_heal_output_path(
     return artifact_dir / "heal" / safe_slug(capability_id) / dirname
 
 
+def default_train_lora_output_path(
+    artifact_dir: Path,
+    capability_id: str,
+    rank: int,
+) -> Path:
+    return artifact_dir / "adapters" / safe_slug(capability_id) / "r{0}".format(rank)
+
+
 def default_certify_output_path(
     artifact_dir: Path,
     capability_id: str,
@@ -1121,6 +1309,10 @@ def print_locate_progress(message: str) -> None:
 
 def print_heal_progress(message: str) -> None:
     print("[heal] {0}".format(message), flush=True)
+
+
+def print_train_lora_progress(message: str) -> None:
+    print("[train-lora] {0}".format(message), flush=True)
 
 
 def print_certify_progress(message: str) -> None:
@@ -1178,6 +1370,9 @@ def main(argv: List[str] = None) -> int:
         return 2
     except HealError as exc:
         print("heal error: {0}".format(exc), file=sys.stderr)
+        return 2
+    except TrainLoRAError as exc:
+        print("train-lora error: {0}".format(exc), file=sys.stderr)
         return 2
     except CertifyError as exc:
         print("certify error: {0}".format(exc), file=sys.stderr)

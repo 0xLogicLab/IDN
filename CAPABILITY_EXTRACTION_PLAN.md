@@ -10,6 +10,12 @@
 > request into the correct local parameter state** (a compiled LoRA), and falls back
 > to the teacher outside trusted regions.
 
+> **Execution checkpoint (2026-07-15):** Phase 1 implementation and E1 evaluation
+> are complete for CoLA, SST-2, and GSM8K. CoLA and SST-2 specialists beat the 1.5B
+> base; GSM8K regressed under both the default and a conservative rank-16 schedule.
+> Per the Phase 1 gate, Phase 2 is blocked until a teacher-distilled GSM8K specialist
+> beats the base. Results: `artifacts/reports/phase1_specialists.json`.
+
 ---
 
 ## 0. Executive summary

@@ -11,6 +11,7 @@ class Example:
     id: str
     prompt_inputs: Dict[str, Any]
     reference: Any
+    gold_target: Optional[str] = None
 
 
 class CapabilitySpec(Protocol):

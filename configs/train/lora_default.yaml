@@ -4,11 +4,21 @@ training:
     r: 16
     alpha: null
     dropout: 0.05
-    target_modules: qkvo
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
   lr: 2.0e-4
   scheduler: cosine
   warmup_ratio: 0.03
   epochs: 2
   max_length: 1024
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  seed: 13
+  log_steps: 10
   gradient_checkpointing: true
-
