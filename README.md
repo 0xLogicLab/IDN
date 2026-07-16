@@ -12,7 +12,9 @@ python -m idn.cli list-capabilities
 python -m idn.cli --machine 3090 train-lora --config configs/capabilities/cola.yaml --rank 16
 python -m idn.cli --machine h100 eval --config configs/capabilities/sst2.yaml --model Qwen2.5-7B-Instruct
 python -m idn.cli --machine h100 visualize-activations --model Qwen2.5-7B-Instruct --capabilities gsm8k,mbpp,cnn_dailymail
-scripts/train_eval_all_lora.sh --machine 3090
+python -m idn.cli --machine 3090 fit-routing --model Qwen2.5-1.5B-Instruct
+python -m idn.cli --machine 3090 route --input "Write Python code to sort a list"
+scripts/train_eval_all_lora.sh
 python -m pytest
 ```
 
@@ -34,6 +36,12 @@ rank-16 adapters are written to `artifacts/adapters/{capability}/r16` with
 
 `scripts/train_eval_all_lora.sh` lists the train and eval commands for all six
 capabilities.
+
+`fit-routing` mean-pools the Qwen2.5-1.5B base model's final hidden states for every
+configured capability, fits PCA and shrinkage-regularized Mahalanobis descriptors,
+and writes `artifacts/routing/{space.npz,report.json}`. The report records held-out
+accuracy, coverage, a confusion matrix, and OOD rejection. `route` uses the same base
+model and returns capability weights, distances, entropy, confidence, and OOD status.
 
 The current Phase 1 measurements and gate decision are recorded in
 `artifacts/reports/phase1_specialists.json`.

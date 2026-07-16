@@ -29,6 +29,7 @@ from idn.extraction.heal import HealError, heal_qwen2_lora
 from idn.extraction.locate import LocateError, locate_qwen2_units
 from idn.eval.runner import run_eval
 from idn.registry import iter_capabilities, spec_from_config
+from idn.routing.space import RoutingError
 from idn.serving.gate import GateError, evaluate_certificate_gate
 from idn.training.train_lora import (
     TrainLoRAError,
@@ -187,6 +188,60 @@ def build_parser() -> argparse.ArgumentParser:
         help="t-SNE perplexity; ignored for PCA.",
     )
     viz_parser.set_defaults(func=cmd_visualize_embeddings)
+
+    routing_parser = subparsers.add_parser(
+        "fit-routing",
+        help="Fit a semantic capability routing space with the 1.5B base model.",
+    )
+    routing_parser.add_argument(
+        "--config-dir",
+        default=str(DEFAULT_CAPABILITY_DIR),
+        help="Directory containing capability YAML files.",
+    )
+    routing_parser.add_argument("--samples-per-capability", type=int, default=500)
+    routing_parser.add_argument(
+        "--eval-samples-per-capability", type=int, default=200
+    )
+    routing_parser.add_argument(
+        "--model", default="Qwen2.5-1.5B-Instruct", help="Base embedding model."
+    )
+    routing_parser.add_argument(
+        "--model-dir", default=None, help="Override machine model_dir."
+    )
+    routing_parser.add_argument("--dtype", default="bfloat16")
+    routing_parser.add_argument("--components", type=int, default=64)
+    routing_parser.add_argument("--shrinkage", type=float, default=0.1)
+    routing_parser.add_argument("--temperature", type=float, default=1.0)
+    routing_parser.add_argument("--ood-percentile", type=float, default=95.0)
+    routing_parser.add_argument("--max-chars", type=int, default=2000)
+    routing_parser.add_argument("--max-length", type=int, default=512)
+    routing_parser.add_argument("--batch-size", type=int, default=None)
+    routing_parser.add_argument("--seed", type=int, default=13)
+    routing_parser.add_argument(
+        "--output", default="artifacts/routing/space.npz"
+    )
+    routing_parser.add_argument(
+        "--report", default="artifacts/routing/report.json"
+    )
+    routing_parser.add_argument(
+        "--override", action="store_true", help="Replace existing routing artifacts."
+    )
+    routing_parser.set_defaults(func=cmd_fit_routing)
+
+    route_parser = subparsers.add_parser(
+        "route", help="Route one request using base-model semantic embeddings."
+    )
+    route_parser.add_argument("--input", required=True, help="Request text to route.")
+    route_parser.add_argument(
+        "--space", default="artifacts/routing/space.npz", help="Routing space NPZ."
+    )
+    route_parser.add_argument(
+        "--model", default=None, help="Override the base model recorded in the space."
+    )
+    route_parser.add_argument("--model-dir", default=None)
+    route_parser.add_argument("--dtype", default=None)
+    route_parser.add_argument("--max-length", type=int, default=None)
+    route_parser.set_defaults(func=cmd_route)
 
     activation_parser = subparsers.add_parser(
         "visualize-activations",
@@ -669,6 +724,88 @@ def cmd_visualize_embeddings(args: argparse.Namespace) -> int:
     print("plot: {0}".format(result["outputs"]["plot"]))
     print("coordinates: {0}".format(result["outputs"]["csv"]))
     print("diagnostics: {0}".format(result["outputs"]["json"]))
+    return 0
+
+
+def cmd_fit_routing(args: argparse.Namespace) -> int:
+    from idn.routing.space import fit_routing_from_configs
+
+    machine = load_machine_config(args.machine)
+    model_path = resolve_relative_dir(
+        base_dir=args.model_dir or machine.model_dir,
+        relative_dir=args.model,
+        field="--model",
+    )
+    output_path = Path(args.output)
+    report_path = Path(args.report)
+    if not args.override and output_path.exists() and report_path.exists():
+        print("Routing artifacts already exist; skipping fit.")
+        print("space: {0}".format(output_path))
+        print("report: {0}".format(report_path))
+        return 0
+    report = fit_routing_from_configs(
+        config_dir=Path(args.config_dir),
+        machine_path=args.machine,
+        model_path=model_path,
+        output_path=output_path,
+        report_path=report_path,
+        dtype=args.dtype,
+        device=machine.device,
+        local_files_only=machine.local_files_only,
+        samples_per_capability=args.samples_per_capability,
+        eval_samples_per_capability=args.eval_samples_per_capability,
+        components=args.components,
+        shrinkage=args.shrinkage,
+        temperature=args.temperature,
+        ood_percentile=args.ood_percentile,
+        max_chars=args.max_chars,
+        max_length=args.max_length,
+        batch_size=args.batch_size or machine.eval_batch_size,
+        seed=args.seed,
+        override=args.override,
+        progress=print_routing_progress,
+    )
+    health = report["health"]
+    print("Routing fit complete.")
+    print("representation: base_model_mean_pooled_hidden_state")
+    print("model: {0}".format(model_path))
+    print("embedding_size: {0}".format(report["embedding_size"]))
+    print("dimensions: {0}".format(report["dimensions"]))
+    print("held_out_accuracy: {0}".format(health["accuracy"]))
+    print("coverage: {0}".format(health["coverage"]))
+    print("ood_rejection_rate: {0}".format(health["ood_rejection_rate"]))
+    print("gate_passed: {0}".format(report["notes"]["gate_passed"]))
+    print("space: {0}".format(output_path))
+    print("report: {0}".format(report_path))
+    return 0
+
+
+def cmd_route(args: argparse.Namespace) -> int:
+    from idn.routing.router import SemanticEmbedder, SemanticRouter
+    from idn.routing.space import RoutingSpace
+
+    machine = load_machine_config(args.machine)
+    space = RoutingSpace.load(Path(args.space))
+    if args.model:
+        model_path = resolve_relative_dir(
+            base_dir=args.model_dir or machine.model_dir,
+            relative_dir=args.model,
+            field="--model",
+        )
+    else:
+        model_path = str(space.metadata.get("model_path", ""))
+        if not model_path:
+            raise RoutingError("routing space does not record a model path; pass --model")
+    embedder = SemanticEmbedder(
+        model_path=model_path,
+        dtype=args.dtype or str(space.metadata.get("dtype", "bfloat16")),
+        device=machine.device,
+        local_files_only=machine.local_files_only,
+        max_length=args.max_length or int(space.metadata.get("max_length", 512)),
+        batch_size=1,
+    ).load()
+    decision = SemanticRouter(space=space, embedder=embedder).route(args.input)
+    print(json.dumps(decision.to_dict(), indent=2, sort_keys=True))
     return 0
 
 
@@ -1320,6 +1457,10 @@ def print_train_lora_progress(message: str) -> None:
     print("[train-lora] {0}".format(message), flush=True)
 
 
+def print_routing_progress(message: str) -> None:
+    print("[routing] {0}".format(message), flush=True)
+
+
 def print_certify_progress(message: str) -> None:
     print("[certify] {0}".format(message), flush=True)
 
@@ -1384,6 +1525,9 @@ def main(argv: List[str] = None) -> int:
         return 2
     except GateError as exc:
         print("gate error: {0}".format(exc), file=sys.stderr)
+        return 2
+    except RoutingError as exc:
+        print("routing error: {0}".format(exc), file=sys.stderr)
         return 2
 
 

@@ -118,9 +118,8 @@ outputs + eval). H100 for sweeps.
 
 **Method (PPT Slide 2):**
 1. Representation `h(x) = ψ(x)`: mean-pooled last-hidden-state of the **1.5B base**
-   over prompt tokens (query-only; no teacher call; reuse
-   `analysis/embedding_viz.py` sampling machinery, but ψ must be the model embedding,
-   not TF-IDF — the router runs at the edge with the model already loaded).
+   over prompt tokens (query-only; no teacher call). Training and evaluation include
+   the task instruction and payload, matching the request seen by the model.
 2. Fit PCA on training-split representations of all capabilities:
    `z = P_m^T (h − h̄)`, m ≈ 32–64.
 3. Per capability: centroid `μ_k`, covariance `Σ_k` (shrinkage-regularized),
@@ -132,8 +131,8 @@ outputs + eval). H100 for sweeps.
 **Modules:**
 - `src/idn/routing/space.py` — fit/save/load routing space
   (`P_m, h̄, {μ_k, Σ_k}, T`) → `artifacts/routing/space.npz`
-- `src/idn/routing/router.py` — `route(x) → {r_k}, d_k, entropy H(r)`; pure numpy at
-  inference.
+- `src/idn/routing/router.py` — base-model embedding plus
+  `route(x) → {r_k}, d_k, entropy H(r)`; routing-space math is pure numpy.
 
 *Gate: routing accuracy ≥ 0.9 on held-out splits (clustering evidence says this is
 attainable); report the confusion matrix.*
@@ -439,7 +438,7 @@ adaptation, multi-node placement optimization.
 2. **Train 3 specialists** (cola, sst2, gsm8k; r16) and produce the E1 rows including
    the cross matrix — confirm specialists work before any composition code.
 3. **Build the router** (`space.py`, `router.py`) with ψ = 1.5B pooled hidden states;
-   verify ≥0.9 routing accuracy.
+   verify ≥0.9 routing accuracy and report OOD rejection.
 4. **Naive mixing + conflict diagnostics** (E3a), then **basis decomposition +
    roundtrip test + basis mixing** (E3b).
 5. **Gate + simulator** for the end-to-end stream (E5) with 7B fallback.
