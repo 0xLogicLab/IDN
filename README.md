@@ -14,6 +14,7 @@ python -m idn.cli --machine h100 eval --config configs/capabilities/sst2.yaml --
 python -m idn.cli --machine h100 visualize-activations --model Qwen2.5-7B-Instruct --capabilities gsm8k,mbpp,cnn_dailymail
 python -m idn.cli --machine 3090 fit-routing --model Qwen2.5-1.5B-Instruct
 python -m idn.cli --machine 3090 route --input "Write Python code to sort a list"
+scripts/build_route_eval_dataset.py --machine 3090
 scripts/train_eval_all_lora.sh
 python -m pytest
 ```
@@ -42,6 +43,10 @@ configured capability, fits PCA and shrinkage-regularized Mahalanobis descriptor
 and writes `artifacts/routing/{space.npz,report.json}`. The report records held-out
 accuracy, coverage, a confusion matrix, and OOD rejection. `route` uses the same base
 model and returns capability weights, distances, entropy, confidence, and OOD status.
+
+`scripts/build_route_eval_dataset.py` creates a deterministic 1,000-example mixed
+end-to-end holdout with prompt inputs, references, gold targets, and a source/overlap
+manifest under `artifacts/eval`.
 
 The current Phase 1 measurements and gate decision are recorded in
 `artifacts/reports/phase1_specialists.json`.
