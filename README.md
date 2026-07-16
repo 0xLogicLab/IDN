@@ -17,6 +17,8 @@ python -m idn.cli --machine 3090 route --input "Write Python code to sort a list
 scripts/build_route_eval_dataset.py --machine 3090
 scripts/eval_oracle_base_lora.sh
 python scripts/eval_routed_lora_mix.py --machine 3090
+python scripts/build_shared_basis.py --components 4
+python scripts/eval_basis_lora_mix.py --machine h100
 scripts/train_eval_all_lora.sh
 python -m pytest
 ```
@@ -61,6 +63,14 @@ metrics, giving every capability equal weight.
 For every request it activates all six LoRAs and scales their contributions by the
 six routing probabilities, producing the exact weighted delta without materializing
 a new rank-96 adapter. Each prediction records all routing weights and diagnostics.
+
+`scripts/build_shared_basis.py` decomposes the six complete LoRA delta operators into
+four global shared basis adapters and one exact residual per capability. The global
+Gram eigendecomposition is computed directly from the low-rank factors, without
+materializing dense Qwen deltas. `scripts/eval_basis_lora_mix.py` combines routing
+weights in the four-dimensional coordinate space and adds only the top-routed
+capability residual, scaled by its route probability. It records the route weights,
+shared coordinates, selected residual, predictions, and native capability metrics.
 
 The current Phase 1 measurements and gate decision are recorded in
 `artifacts/reports/phase1_specialists.json`.

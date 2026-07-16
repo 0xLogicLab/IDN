@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Evaluate mixed examples without ROUTE using base or oracle LoRA."
     )
     parser.add_argument("--mode", choices=("base", "lora"), required=True)
-    parser.add_argument("--machine", default="h100")
+    parser.add_argument("--machine", default="3090")
     parser.add_argument("--config-dir", default="configs/capabilities")
     parser.add_argument("--dataset", default="artifacts/eval/idn_mixed_1000.jsonl")
     parser.add_argument("--model", default="Qwen2.5-1.5B-Instruct")
