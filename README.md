@@ -16,6 +16,7 @@ python -m idn.cli --machine 3090 fit-routing --model Qwen2.5-1.5B-Instruct
 python -m idn.cli --machine 3090 route --input "Write Python code to sort a list"
 scripts/build_route_eval_dataset.py --machine 3090
 scripts/eval_oracle_base_lora.sh
+python scripts/eval_routed_lora_mix.py --machine 3090
 scripts/train_eval_all_lora.sh
 python -m pytest
 ```
@@ -55,6 +56,11 @@ oracle baseline and does not invoke ROUTE. Each run loads the base once; LoRA mo
 loads all six adapters and switches with `set_adapter`. The aggregate
 `macro_capability_score` is the unweighted mean of the six normalized primary
 metrics, giving every capability equal weight.
+
+`scripts/eval_routed_lora_mix.py` evaluates the same stream with semantic ROUTE.
+For every request it activates all six LoRAs and scales their contributions by the
+six routing probabilities, producing the exact weighted delta without materializing
+a new rank-96 adapter. Each prediction records all routing weights and diagnostics.
 
 The current Phase 1 measurements and gate decision are recorded in
 `artifacts/reports/phase1_specialists.json`.
