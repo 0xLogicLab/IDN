@@ -15,6 +15,7 @@ python -m idn.cli --machine h100 visualize-activations --model Qwen2.5-7B-Instru
 python -m idn.cli --machine 3090 fit-routing --model Qwen2.5-1.5B-Instruct
 python -m idn.cli --machine 3090 route --input "Write Python code to sort a list"
 scripts/build_route_eval_dataset.py --machine 3090
+scripts/eval_oracle_base_lora.sh
 scripts/train_eval_all_lora.sh
 python -m pytest
 ```
@@ -47,6 +48,13 @@ model and returns capability weights, distances, entropy, confidence, and OOD st
 `scripts/build_route_eval_dataset.py` creates a deterministic 1,000-example mixed
 end-to-end holdout with prompt inputs, references, gold targets, and a source/overlap
 manifest under `artifacts/eval`.
+
+`scripts/eval_oracle_base_lora.sh` evaluates that mixed dataset with the 1.5B base
+and with the matching capability LoRA selected from the ground-truth label. It is an
+oracle baseline and does not invoke ROUTE. Each run loads the base once; LoRA mode
+loads all six adapters and switches with `set_adapter`. The aggregate
+`macro_capability_score` is the unweighted mean of the six normalized primary
+metrics, giving every capability equal weight.
 
 The current Phase 1 measurements and gate decision are recorded in
 `artifacts/reports/phase1_specialists.json`.
