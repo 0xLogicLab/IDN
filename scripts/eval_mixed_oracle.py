@@ -35,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-dir", default=None)
     parser.add_argument("--adapter-root", default="artifacts/adapters")
     parser.add_argument("--rank", type=int, default=16)
+    parser.add_argument(
+        "--gsm8k-adapter",
+        default=None,
+        help="Override the GSM8K adapter path while keeping other adapters under --adapter-root.",
+    )
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--output", required=True)
     parser.add_argument("--limit", type=int, default=0)
@@ -71,6 +76,8 @@ def main() -> int:
         capability: Path(args.adapter_root) / capability / "r{0}".format(args.rank)
         for capability in capabilities
     }
+    if args.gsm8k_adapter:
+        adapter_paths["gsm8k"] = Path(args.gsm8k_adapter)
     if args.mode == "lora":
         validate_adapters(adapter_paths)
 
