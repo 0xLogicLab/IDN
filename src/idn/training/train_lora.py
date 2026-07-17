@@ -140,7 +140,8 @@ def encode_training_example(
     spec: CapabilitySpec,
     example: Example,
     max_length: int,
-) -> Mapping[str, List[int]]:
+    answer_loss_weight: float = 1.0,
+) -> Mapping[str, List[Any]]:
     """Encode one chat example while masking prompt tokens from SFT loss."""
 
     prompt = render_prompt(tokenizer, spec.format_prompt(example))
@@ -150,8 +151,9 @@ def encode_training_example(
     prompt_ids = list(
         tokenizer(prompt, add_special_tokens=False)["input_ids"]
     )
+    target_text = target.strip()
     target_ids = list(
-        tokenizer(target.strip(), add_special_tokens=False)["input_ids"]
+        tokenizer(target_text, add_special_tokens=False)["input_ids"]
     )
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
     if eos_token_id is not None and (
@@ -161,22 +163,43 @@ def encode_training_example(
     if not target_ids:
         raise TrainLoRAError("example {0} has no target tokens".format(example.id))
 
+    if answer_loss_weight <= 0.0:
+        raise TrainLoRAError("answer_loss_weight must be positive")
+    target_weights = [1.0] * len(target_ids)
+    answer_marker = target_text.rfind("####")
+    if answer_loss_weight != 1.0 and answer_marker >= 0:
+        # Tokenize the prefix to locate the marker in the full target sequence.
+        # Include the token immediately before the marker because BPE tokenization
+        # can merge whitespace with the marker itself.
+        prefix_length = len(
+            tokenizer(target_text[:answer_marker], add_special_tokens=False)[
+                "input_ids"
+            ]
+        )
+        answer_start = max(0, prefix_length - 1)
+        target_weights[answer_start:] = [answer_loss_weight] * (
+            len(target_weights) - answer_start
+        )
+
     if len(target_ids) >= max_length:
         target_ids = target_ids[-max_length:]
+        target_weights = target_weights[-max_length:]
         prompt_ids = []
     else:
         prompt_ids = prompt_ids[-(max_length - len(target_ids)) :]
     input_ids = prompt_ids + target_ids
     labels = [-100] * len(prompt_ids) + target_ids
+    loss_weights = [0.0] * len(prompt_ids) + target_weights
     return {
         "input_ids": input_ids,
         "attention_mask": [1] * len(input_ids),
         "labels": labels,
+        "loss_weights": loss_weights,
     }
 
 
 def collate_training_examples(
-    records: Sequence[Mapping[str, Sequence[int]]],
+    records: Sequence[Mapping[str, Sequence[Any]]],
     pad_token_id: int,
 ) -> Mapping[str, Any]:
     """Right-pad variable-length causal-LM records into PyTorch tensors."""
@@ -189,16 +212,72 @@ def collate_training_examples(
     input_rows = []
     mask_rows = []
     label_rows = []
+    weight_rows = []
     for record in records:
         padding = width - len(record["input_ids"])
         input_rows.append(list(record["input_ids"]) + [pad_token_id] * padding)
         mask_rows.append(list(record["attention_mask"]) + [0] * padding)
         label_rows.append(list(record["labels"]) + [-100] * padding)
+        weights = list(record.get("loss_weights", []))
+        if not weights:
+            weights = [1.0 if label != -100 else 0.0 for label in record["labels"]]
+        weight_rows.append(weights + [0.0] * padding)
     return {
         "input_ids": torch.tensor(input_rows, dtype=torch.long),
         "attention_mask": torch.tensor(mask_rows, dtype=torch.long),
         "labels": torch.tensor(label_rows, dtype=torch.long),
+        "loss_weights": torch.tensor(weight_rows, dtype=torch.float32),
     }
+
+
+def weighted_causal_lm_loss(
+    *,
+    logits: Any,
+    labels: Any,
+    loss_weights: Any,
+) -> Any:
+    """Compute mean next-token CE with per-label weights.
+
+    Labels equal to -100 remain ignored. The weights are aligned with labels,
+    including the causal one-token shift.
+    """
+
+    import torch.nn.functional as functional
+
+    shift_logits = logits[..., :-1, :].float().contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    shift_weights = loss_weights[..., 1:].to(dtype=shift_logits.dtype).contiguous()
+    token_loss = functional.cross_entropy(
+        shift_logits.view(-1, shift_logits.shape[-1]),
+        shift_labels.view(-1),
+        reduction="none",
+        ignore_index=-100,
+    )
+    valid_weights = shift_weights.view(-1) * (shift_labels.view(-1) != -100)
+    denominator = valid_weights.sum().clamp_min(1.0)
+    return (token_loss * valid_weights).sum() / denominator
+
+
+def base_preservation_kl_loss(
+    *,
+    student_logits: Any,
+    base_logits: Any,
+    labels: Any,
+    temperature: float = 1.0,
+) -> Any:
+    """KL regularization on target positions against the adapter-disabled base."""
+
+    import torch.nn.functional as functional
+
+    student = student_logits[..., :-1, :].float() / temperature
+    teacher = base_logits[..., :-1, :].float() / temperature
+    valid = (labels[..., 1:] != -100).to(dtype=student.dtype)
+    token_kl = functional.kl_div(
+        functional.log_softmax(student, dim=-1),
+        functional.softmax(teacher, dim=-1),
+        reduction="none",
+    ).sum(dim=-1)
+    return (token_kl * valid).sum() * (temperature**2) / valid.sum().clamp_min(1.0)
 
 
 def train_lora(
@@ -227,6 +306,8 @@ def train_lora(
     seed: int = 13,
     log_steps: int = 10,
     gradient_checkpointing: bool = True,
+    answer_loss_weight: float = 1.0,
+    base_kl_weight: float = 0.0,
     override: bool = False,
     progress: Optional[Callable[[str], None]] = None,
     model: Optional[Any] = None,
@@ -252,6 +333,10 @@ def train_lora(
         target_modules=target_modules,
         max_steps=max_steps,
     )
+    if answer_loss_weight <= 0.0:
+        raise TrainLoRAError("answer_loss_weight must be positive")
+    if base_kl_weight < 0.0:
+        raise TrainLoRAError("base_kl_weight must be non-negative")
     base_model_path = Path(base_model_path)
     output_dir = Path(output_dir)
     _validate_model_dir(base_model_path)
@@ -385,6 +470,8 @@ def train_lora(
         total_count=total_count,
         started_at=started_at,
         final_loss=None,
+        answer_loss_weight=answer_loss_weight,
+        base_kl_weight=base_kl_weight,
     )
     write_json_atomic(output_dir / "train_meta.json", metadata)
     write_json_atomic(output_dir / "training_log.json", {"steps": []})
@@ -406,6 +493,8 @@ def train_lora(
                     break
                 micro_batches.append(indices)
             accumulated_loss = 0.0
+            accumulated_sft_loss = 0.0
+            accumulated_kl_loss = 0.0
             for indices in micro_batches:
                 records = [
                     encode_training_example(
@@ -413,6 +502,7 @@ def train_lora(
                         spec=spec,
                         example=examples[index],
                         max_length=max_length,
+                        answer_loss_weight=answer_loss_weight,
                     )
                     for index in indices
                 ]
@@ -421,12 +511,43 @@ def train_lora(
                     key: value.to(target_device) for key, value in batch.items()
                 }
                 with _autocast(torch, target_device, resolved_dtype):
+                    loss_weights = batch.pop("loss_weights")
+                    base_logits = None
+                    if base_kl_weight > 0.0:
+                        with torch.no_grad(), model.disable_adapter():
+                            base_output = model(
+                                input_ids=batch["input_ids"],
+                                attention_mask=batch["attention_mask"],
+                                use_cache=False,
+                            )
+                            base_logits = base_output.logits
                     output = model(**batch, use_cache=False)
                     if output.loss is None or not torch.isfinite(output.loss):
                         raise TrainLoRAError("training produced a non-finite loss")
-                    loss = output.loss / len(micro_batches)
+                    if answer_loss_weight == 1.0:
+                        sft_loss = output.loss
+                    else:
+                        sft_loss = weighted_causal_lm_loss(
+                            logits=output.logits,
+                            labels=batch["labels"],
+                            loss_weights=loss_weights,
+                        )
+                        if not torch.isfinite(sft_loss):
+                            raise TrainLoRAError("weighted training produced a non-finite loss")
+                    if base_logits is None:
+                        kl_loss = sft_loss.new_zeros(())
+                    else:
+                        kl_loss = base_preservation_kl_loss(
+                            student_logits=output.logits,
+                            base_logits=base_logits,
+                            labels=batch["labels"],
+                        )
+                    loss = sft_loss + base_kl_weight * kl_loss
+                    loss = loss / len(micro_batches)
                 loss.backward()
-                accumulated_loss += float(output.loss.detach().cpu())
+                accumulated_loss += float(loss.detach().cpu()) * len(micro_batches)
+                accumulated_sft_loss += float(sft_loss.detach().cpu())
+                accumulated_kl_loss += float(kl_loss.detach().cpu())
 
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 trainable_parameters, max_grad_norm
@@ -439,6 +560,8 @@ def train_lora(
                 "step": completed_steps,
                 "epoch": epoch,
                 "loss": accumulated_loss / len(micro_batches),
+                "sft_loss": accumulated_sft_loss / len(micro_batches),
+                "kl_loss": accumulated_kl_loss / len(micro_batches),
                 "grad_norm": float(grad_norm.detach().cpu()),
                 "learning_rate": float(lr_scheduler.get_last_lr()[0]),
             }
@@ -488,6 +611,8 @@ def train_lora(
         total_count=total_count,
         started_at=started_at,
         final_loss=final_loss,
+        answer_loss_weight=answer_loss_weight,
+        base_kl_weight=base_kl_weight,
     )
     write_json_atomic(output_dir / "training_log.json", {"steps": training_log})
     write_json_atomic(output_dir / "train_meta.json", metadata)
@@ -528,6 +653,8 @@ def _build_metadata(
     total_count: int,
     started_at: str,
     final_loss: Optional[float],
+    answer_loss_weight: float = 1.0,
+    base_kl_weight: float = 0.0,
 ) -> Mapping[str, Any]:
     return {
         "artifact_version": 1,
@@ -559,6 +686,8 @@ def _build_metadata(
             "planned_steps": planned_steps,
             "completed_steps": completed_steps,
             "final_loss": final_loss,
+            "answer_loss_weight": answer_loss_weight,
+            "base_kl_weight": base_kl_weight,
             "max_length": max_length,
             "batch_size": batch_size,
             "gradient_accumulation_steps": gradient_accumulation_steps,

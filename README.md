@@ -19,6 +19,7 @@ scripts/eval_oracle_base_lora.sh
 python scripts/eval_routed_lora_mix.py --machine 3090
 python scripts/build_shared_basis.py --components 4
 python scripts/eval_basis_lora_mix.py --machine h100
+python scripts/train_gsm8k_improved.py --machine 3090
 scripts/train_eval_all_lora.sh
 python -m pytest
 ```
@@ -41,6 +42,10 @@ rank-16 adapters are written to `artifacts/adapters/{capability}/r16` with
 
 `scripts/train_eval_all_lora.sh` lists the train and eval commands for all six
 capabilities.
+
+`scripts/train_gsm8k_improved.py` is the experimental GSM8K training path. It uses
+cleaned rationale targets and base-model KL preservation; candidates are evaluated
+at full adapter strength before they can replace the standard adapter.
 
 `fit-routing` mean-pools the Qwen2.5-1.5B base model's final hidden states for every
 configured capability, fits PCA and shrinkage-regularized Mahalanobis descriptors,

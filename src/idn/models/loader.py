@@ -200,6 +200,46 @@ class ChatModel:
         generated = output_ids[0][prompt_tokens:]
         return self.tokenizer.decode(generated, skip_special_tokens=True).strip()
 
+    def generate_batch(
+        self,
+        messages_batch: List[List[Dict[str, str]]],
+        max_new_tokens: int,
+    ) -> List[str]:
+        """Greedily generate a response for each left-padded chat prompt."""
+
+        if not messages_batch:
+            return []
+        if self.model is None or self.tokenizer is None:
+            self.load()
+        try:
+            import torch
+        except ImportError as exc:
+            raise ModelLoadError("torch is required for generation") from exc
+        prompts = [self.render_prompt(messages) for messages in messages_batch]
+        if self.processor is not None:
+            inputs = self.processor(text=prompts, return_tensors="pt", padding=True)
+        else:
+            inputs = self.tokenizer(prompts, return_tensors="pt", padding=True)
+        inputs = {
+            key: value.to(self.model.device)
+            for key, value in inputs.items()
+        }
+        prompt_width = int(inputs["input_ids"].shape[-1])
+        with torch.no_grad():
+            output_ids = self.model.generate(
+                **inputs,
+                do_sample=False,
+                temperature=None,
+                top_p=None,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+        return [
+            self.tokenizer.decode(row[prompt_width:], skip_special_tokens=True).strip()
+            for row in output_ids
+        ]
+
     def stream_generate(
         self,
         messages: List[Dict[str, str]],

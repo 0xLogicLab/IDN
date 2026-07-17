@@ -14,6 +14,7 @@ from idn.config import CapabilityConfig
 
 NUMBER_RE = re.compile(r"[-+]?(?:\d[\d,]*)(?:\.\d+)?")
 HASH_ANSWER_RE = re.compile(r"####\s*([-+]?(?:\d[\d,]*)(?:\.\d+)?)")
+CALCULATOR_ANNOTATION_RE = re.compile(r"<<[^<>]*>>")
 
 
 @dataclass
@@ -85,7 +86,7 @@ class GSM8KSpec:
             if parsed is not None:
                 return teacher_text.strip()
         if ex.gold_target:
-            return ex.gold_target.strip()
+            return clean_gsm8k_rationale(ex.gold_target)
         return "#### {0}".format(ex.reference)
 
     def metric(self, preds: List[Any], refs: List[Any]) -> Dict[str, float]:
@@ -114,6 +115,12 @@ def parse_gsm8k_answer(text: str) -> Optional[str]:
     if not number_matches:
         return None
     return normalize_number(number_matches[-1])
+
+
+def clean_gsm8k_rationale(text: str) -> str:
+    """Remove GSM8K calculator annotations while preserving readable reasoning."""
+
+    return CALCULATOR_ANNOTATION_RE.sub("", str(text)).strip()
 
 
 def normalize_number(value: Any) -> Optional[str]:

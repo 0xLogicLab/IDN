@@ -32,10 +32,8 @@ def run_eval(
 ) -> Dict[str, Any]:
     """Run greedy model eval and write a JSON artifact."""
 
-    if batch_size != 1:
-        # Batching is intentionally deferred until the generation wrapper supports
-        # per-example decoded slicing robustly for chat templates.
-        batch_size = 1
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
 
     examples = spec.load_split(split=split, limit=limit)
     log = log_file
@@ -84,19 +82,37 @@ def run_eval(
     )
     write_eval_artifact(output_path, result)
 
-    for ex in examples:
-        record = _eval_one(
-            model=chat_model,
-            spec=spec,
-            ex=ex,
-            max_new_tokens=max_new_tokens,
-        )
-        if verbose:
-            _print_verbose_record(log=log, index=len(records) + 1, total=len(examples), record=record)
-        records.append(record)
-        parsed_preds.append(record["parsed_prediction"])
-        refs.append(ex.reference)
-        latencies_ms.append(record["latency_ms"])
+    for offset in range(0, len(examples), batch_size):
+        example_batch = examples[offset : offset + batch_size]
+        if len(example_batch) > 1 and hasattr(chat_model, "generate_batch"):
+            batch_records = _eval_many(
+                model=chat_model,
+                spec=spec,
+                examples=example_batch,
+                max_new_tokens=max_new_tokens,
+            )
+        else:
+            batch_records = [
+                _eval_one(
+                    model=chat_model,
+                    spec=spec,
+                    ex=ex,
+                    max_new_tokens=max_new_tokens,
+                )
+                for ex in example_batch
+            ]
+        for ex, record in zip(example_batch, batch_records):
+            if verbose:
+                _print_verbose_record(
+                    log=log,
+                    index=len(records) + 1,
+                    total=len(examples),
+                    record=record,
+                )
+            records.append(record)
+            parsed_preds.append(record["parsed_prediction"])
+            refs.append(ex.reference)
+            latencies_ms.append(record["latency_ms"])
         metrics = spec.metric(parsed_preds, refs)
         result = _build_result(
             spec=spec,
@@ -155,6 +171,34 @@ def _eval_one(
         "reference": ex.reference,
         "latency_ms": latency_ms,
     }
+
+
+def _eval_many(
+    model: Any,
+    spec: CapabilitySpec,
+    examples: List[Example],
+    max_new_tokens: int,
+) -> List[Dict[str, Any]]:
+    messages_batch = [spec.format_prompt(ex) for ex in examples]
+    start = time.perf_counter()
+    raw_predictions = model.generate_batch(
+        messages_batch=messages_batch,
+        max_new_tokens=max_new_tokens,
+    )
+    if len(raw_predictions) != len(examples):
+        raise RuntimeError("batch generation returned the wrong number of predictions")
+    latency_ms = (time.perf_counter() - start) * 1000.0 / len(examples)
+    return [
+        {
+            "id": ex.id,
+            "prompt_inputs": ex.prompt_inputs,
+            "raw_prediction": raw,
+            "parsed_prediction": spec.parse_prediction(raw),
+            "reference": ex.reference,
+            "latency_ms": latency_ms,
+        }
+        for ex, raw in zip(examples, raw_predictions)
+    ]
 
 
 def percentile(values: List[float], pct: int) -> float:

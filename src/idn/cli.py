@@ -127,6 +127,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override capability max_new_tokens.",
     )
     eval_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Generation batch size. Defaults to the machine eval batch size.",
+    )
+    eval_parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print each eval input, reference label, raw prediction, and parsed prediction.",
@@ -1324,7 +1330,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         device=resolved.machine.device,
         max_new_tokens=args.max_new_tokens or resolved.capability.max_new_tokens,
         local_files_only=resolved.machine.local_files_only,
-        batch_size=resolved.machine.eval_batch_size,
+        batch_size=args.batch_size or resolved.machine.eval_batch_size,
         verbose=args.verbose,
     )
     return 0
