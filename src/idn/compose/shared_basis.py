@@ -68,6 +68,7 @@ def build_shared_basis(
         _load_source(capability, Path(adapter_paths[capability]))
         for capability in capabilities
     ]
+    _align_source_modules(sources)
     _validate_sources(sources)
     print("Computing global LoRA Gram matrix", flush=True)
     gram = compute_adapter_gram(
@@ -86,7 +87,17 @@ def build_shared_basis(
     try:
         basis_entries = []
         materialized_rank = sum(int(source["rank"]) for source in sources)
-        output_config = _output_config(sources[0]["config"], materialized_rank)
+        output_config = _output_config(
+            sources[0]["config"],
+            materialized_rank,
+            target_modules=sorted(
+                {
+                    str(target)
+                    for source in sources
+                    for target in source["config"].get("target_modules") or []
+                }
+            ),
+        )
         for component in range(components):
             name = "basis_{0:02d}".format(component)
             relative_path = Path("bases") / name
@@ -185,6 +196,14 @@ def build_shared_basis(
                     "rank": int(source["rank"]),
                     "alpha": float(source["alpha"]),
                     "scaling": float(source["scaling"]),
+                    "target_modules": sorted(
+                        str(target)
+                        for target in source["config"].get("target_modules") or []
+                    ),
+                    "zero_filled_lora_modules": int(
+                        len(_factor_keys(source["state"]))
+                        - len(source["original_factor_keys"])
+                    ),
                     "config_sha256": _sha256(source["path"] / CONFIG_NAME),
                     "weights_sha256": _sha256(source["path"] / WEIGHTS_NAME),
                 }
@@ -373,12 +392,13 @@ def _load_source(capability: str, path: Path) -> Dict[str, Any]:
     alpha = float(config["lora_alpha"])
     scaling = alpha / (math.sqrt(rank) if config.get("use_rslora") else rank)
     state = load_file(str(weights_path), device="cpu")
-    _factor_keys(state)
+    original_factor_keys = _factor_keys(state)
     return {
         "capability": capability,
         "path": path,
         "config": config,
         "state": state,
+        "original_factor_keys": original_factor_keys,
         "rank": rank,
         "alpha": alpha,
         "scaling": scaling,
@@ -388,20 +408,54 @@ def _load_source(capability: str, path: Path) -> Dict[str, Any]:
 def _validate_sources(sources: Sequence[Mapping[str, Any]]) -> None:
     first = sources[0]
     first_keys = _factor_keys(first["state"])
-    first_targets = set(first["config"].get("target_modules") or [])
     for source in sources:
         if int(source["rank"]) != int(first["rank"]):
             raise SharedBasisError("source adapters must use the same rank")
         if _factor_keys(source["state"]) != first_keys:
             raise SharedBasisError("source adapters have different LoRA modules")
-        if set(source["config"].get("target_modules") or []) != first_targets:
-            raise SharedBasisError("source adapters have different target modules")
         for a_key in first_keys:
             b_key = _b_key(a_key)
             if source["state"][a_key].shape[0] != int(source["rank"]):
                 raise SharedBasisError("unexpected A rank in {0}".format(a_key))
             if source["state"][b_key].shape[1] != int(source["rank"]):
                 raise SharedBasisError("unexpected B rank in {0}".format(b_key))
+
+
+def _align_source_modules(sources: Sequence[Dict[str, Any]]) -> None:
+    """Represent missing adapter modules as exact zero LoRA factors."""
+
+    all_keys = sorted(
+        {
+            key
+            for source in sources
+            for key in _factor_keys(source["state"])
+        }
+    )
+    for a_key in all_keys:
+        b_key = _b_key(a_key)
+        present = [source for source in sources if a_key in source["state"]]
+        reference_a = present[0]["state"][a_key]
+        reference_b = present[0]["state"][b_key]
+        in_features = int(reference_a.shape[1])
+        out_features = int(reference_b.shape[0])
+        for source in present:
+            a_factor = source["state"][a_key]
+            b_factor = source["state"][b_key]
+            if int(a_factor.shape[1]) != in_features or int(b_factor.shape[0]) != out_features:
+                raise SharedBasisError(
+                    "source adapters have incompatible shapes for {0}".format(a_key)
+                )
+        for source in sources:
+            if a_key in source["state"]:
+                continue
+            rank = int(source["rank"])
+            dtype = next(iter(source["state"].values())).dtype
+            source["state"][a_key] = torch.zeros(
+                (rank, in_features), dtype=dtype
+            )
+            source["state"][b_key] = torch.zeros(
+                (out_features, rank), dtype=dtype
+            )
 
 
 def _factor_keys(state: Mapping[str, torch.Tensor]) -> List[str]:
@@ -448,7 +502,12 @@ def _write_adapter(
     save_file(output_state, str(path / WEIGHTS_NAME), metadata={"format": "pt"})
 
 
-def _output_config(source_config: Mapping[str, Any], rank: int) -> Dict[str, Any]:
+def _output_config(
+    source_config: Mapping[str, Any],
+    rank: int,
+    *,
+    target_modules: Sequence[str],
+) -> Dict[str, Any]:
     config = dict(source_config)
     config.update(
         {
@@ -462,7 +521,7 @@ def _output_config(source_config: Mapping[str, Any], rank: int) -> Dict[str, Any
             "use_rslora": False,
         }
     )
-    config["target_modules"] = sorted(config.get("target_modules") or [])
+    config["target_modules"] = list(target_modules)
     return config
 
 
