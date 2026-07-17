@@ -53,26 +53,40 @@ evaluation overlap, not training leakage.
 |---|---|---:|---:|---:|---:|
 | 1.5B base | Complete, 1,000/1,000 | 0.6224 | 0.6220 | N/A | N/A |
 | 7B base | Complete, 1,000/1,000 | 0.6939 | 0.6938 | N/A | N/A |
-| Oracle capability LoRA | Pending; no result artifact yet | - | - | 1.0000 by definition | N/A |
+| Oracle capability LoRA (scaled GSM8K) | Complete, 1,000/1,000 | 0.6849 | 0.6844 | 1.0000 by definition | N/A |
+| Semantic ROUTE + top-1 single LoRA (scaled GSM8K) | Complete, 1,000/1,000 | 0.6053 | 0.6052 | 0.9010 | 0.5890 |
 | Semantic ROUTE + weighted six-LoRA mix (scaled GSM8K) | Complete, 1,000/1,000 | 0.6141 | 0.6140 | 0.9010 | 0.5930 |
 | Semantic ROUTE + four-basis/top-1-residual mix (scaled GSM8K) | Complete, 1,000/1,000 | 0.6148 | 0.6147 | 0.9010 | 0.5930 |
 
-The completed 1.5B and 7B base, direct routed-LoRA, and shared-basis
-per-capability results are:
+The completed 1.5B and 7B base, oracle-LoRA, top-1 routed-LoRA, weighted routed-LoRA,
+and shared-basis per-capability results are:
 
-| Capability | 1.5B base | 7B base | Routed LoRA | Shared basis | Basis vs 1.5B |
-|---|---:|---:|---:|---:|---:|
-| CNN/DailyMail ROUGE-L | 0.2098 | 0.2202 | 0.2394 | 0.2375 | +0.0277 |
-| CoLA accuracy | 0.7784 | 0.7784 | 0.8443 | 0.8503 | +0.0719 |
-| GSM8K exact match | 0.6527 | 0.8503 | 0.6467 | 0.6527 | 0.0000 |
-| MBPP pass@1 | 0.5329 | 0.7725 | 0.5868 | 0.5749 | +0.0419 |
-| SQuAD exact match | 0.6145 | 0.6024 | 0.4036 | 0.4096 | -0.2048 |
-| SST-2 accuracy | 0.9458 | 0.9398 | 0.9639 | 0.9639 | +0.0181 |
+| Capability | 1.5B base | 7B base | Oracle LoRA | Top-1 LoRA | Weighted LoRA | Shared basis |
+|---|---:|---:|---:|---:|---:|---:|
+| CNN/DailyMail ROUGE-L | 0.2098 | 0.2202 | 0.2362 | 0.2347 | 0.2394 | 0.2375 |
+| CoLA accuracy | 0.7784 | 0.7784 | 0.8443 | 0.8503 | 0.8443 | 0.8503 |
+| GSM8K exact match | 0.6527 | 0.8503 | 0.6587 | 0.6407 | 0.6467 | 0.6527 |
+| MBPP pass@1 | 0.5329 | 0.7725 | 0.5749 | 0.5988 | 0.5868 | 0.5749 |
+| SQuAD exact match | 0.6145 | 0.6024 | 0.8313 | 0.3434 | 0.4036 | 0.4096 |
+| SST-2 accuracy | 0.9458 | 0.9398 | 0.9639 | 0.9639 | 0.9639 | 0.9639 |
 
 On the mixed stream, the 7B base exceeds the 1.5B base by 0.0716 macro score
 and 0.0717 sample-weighted score. Its largest gains are MBPP (+0.2395 pass@1)
 and GSM8K (+0.1976 exact match). CNN/DailyMail improves by 0.0104 and CoLA is
 unchanged, while SQuAD and SST-2 decrease by 0.0120 and 0.0060 respectively.
+
+Ground-truth capability selection raises the LoRA macro score to 0.6849, which is
+0.0625 above the 1.5B base, 0.0707 above direct routed mixing, and only 0.0091
+below the 7B base. Every oracle specialist improves over the 1.5B base on this
+stream. The largest gain is SQuAD (+0.2169 exact match), followed by CoLA
+(+0.0659), MBPP (+0.0419), and CNN/DailyMail (+0.0263).
+
+Minimum-distance top-1 routing with one native-scale adapter scores 0.6053 macro,
+which is 0.0171 below the 1.5B base and 0.0796 below oracle selection. It also
+scores 0.0088 below weighted LoRA mixing, so this experiment does not support the
+hypothesis that weight mixing is responsible for the aggregate accuracy loss.
+Hard selection improves CoLA and MBPP relative to weighted mixing, but loses 0.0047
+on CNN/DailyMail, 0.0060 on GSM8K, and 0.0602 on SQuAD.
 
 Replacing the full-strength GSM8K adapter raises the routed mixture macro score
 from 0.5779 to 0.6141 and the shared-basis score from 0.5675 to 0.6148. The direct
@@ -82,15 +96,17 @@ GSM8K and 0.0663 on SQuAD. The updated direct and basis mixtures remain 0.0082 a
 
 The shared-basis result is 0.0007 above direct mixing. It exactly matches the 1.5B
 base on GSM8K and improves CNN/DailyMail, CoLA, MBPP, and SST-2, but SQuAD remains
-0.2048 below the base. This is still primarily a routing problem: only 69 of 166
-SQuAD requests route to SQuAD, while 96 route to CNN/DailyMail.
+0.2048 below the base and 0.4217 below oracle selection. This is primarily a
+routing and weighted-composition problem: only 69 of 166 SQuAD requests route to
+SQuAD, while 96 route to CNN/DailyMail.
 
 ## Routing findings
 
 The router fit report is strong on its original held-out set: 0.9967 routing
 accuracy over 1,200 samples, 0.7742 coverage, 1.0000 selective accuracy, and 1.0000
 rejection on 200 synthetic OOD probes. On the custom mixed stream, however,
-routing accuracy falls to 0.9010 and coverage to 0.5930.
+routing accuracy falls to 0.9010. In-scope coverage is 0.5890 for the top-1 run
+and 0.5930 for the weighted and shared-basis runs.
 
 The mixed-stream mean route confidence is 0.9744 despite the SQuAD errors. This
 indicates that the current distance-derived probabilities are overconfident under
@@ -124,14 +140,18 @@ bases and the probability-scaled top-1 residual are active for each request.
   base, while CoLA, SQuAD, and SST-2 specialists improve clearly. On the mixed
   stream, SQuAD routing is now the dominant measured failure rather than GSM8K
   specialist quality.
+- Oracle capability selection reaches 0.6849 macro score, establishing a 0.0707
+  gap to direct routed mixing and a 0.0701 gap to shared-basis routing. Nearly all
+  of this aggregate gap is explained by SQuAD, where oracle selection scores
+  0.8313 but routed and basis mixing score only 0.4036 and 0.4096.
+- Hard top-1 adapter selection does not recover the weighted-composition loss. It
+  scores 0.6053 macro, below weighted mixing at 0.6141 and shared-basis mixing at
+  0.6148. Its SQuAD score falls further to 0.3434 because the same 96 SQuAD
+  requests are routed to CNN/DailyMail and receive only that incorrect adapter.
 - Cross-capability tests show severe negative transfer from selecting the wrong
   adapter. For example, CoLA accuracy falls from a 0.74 base anchor to 0.28 with
   the SST-2 adapter, and SST-2 accuracy falls from 0.92 to 0.09 with the CoLA
   adapter. Correct routing or conservative rejection is therefore essential.
-- The next decisive comparison is the missing oracle-LoRA result on the same
-  1,000-example mixed stream. It will separate specialist-quality failures from
-  routing failures; the completed basis result now quantifies the additional cost
-  of shared-space truncation.
 
 ## Source artifacts
 
@@ -142,7 +162,8 @@ bases and the probability-scaled top-1 residual are active for each request.
 - Mixed dataset: `artifacts/eval/idn_mixed_1000.jsonl`
 - Mixed base: `artifacts/eval/idn_mixed_oracle/base.json`
 - Mixed 7B base: `artifacts/eval/idn_mixed_oracle/7b_base.json`
-- Mixed oracle LoRA: `artifacts/eval/idn_mixed_oracle/oracle_lora.json` (pending)
+- Mixed oracle LoRA with scaled GSM8K: `artifacts/eval/idn_mixed_scaled_gsm8k/oracle_lora.json`
+- Routed top-1 LoRA with scaled GSM8K: `artifacts/eval/idn_mixed_scaled_gsm8k/routed_top1_lora.json`
 - Routed weighted LoRA with scaled GSM8K: `artifacts/eval/idn_mixed_scaled_gsm8k/routed_lora_mix.json`
 - Routed shared basis with scaled GSM8K: `artifacts/eval/idn_mixed_scaled_gsm8k/basis_lora_mix.json`
 - Router report: `artifacts/routing/report.json`
