@@ -19,6 +19,17 @@ scripts/eval_oracle_base_lora.sh
 python scripts/eval_routed_lora_mix.py --machine 3090
 python scripts/build_shared_basis.py --components 4
 python scripts/eval_basis_lora_mix.py --machine h100
+python scripts/eval_selective_fallback.py --machine 3090 \
+  --calibration-fraction 0.4 --quality-tolerance 0.0 \
+  --local-capabilities cnn_dailymail,cola,squad,sst2
+python scripts/plot_fallback_performance.py
+python scripts/eval_cross_capability_matrix.py --machine h100 --batch-size 4
+python scripts/plot_wrong_lora_negative_transfer.py
+python scripts/eval_carving_accuracy_sweep.py --machine h100 \
+  --carved-root /mnt/8T/whl/idn_carving_sweep
+python scripts/eval_carving_healing_sweep.py --machine h100 \
+  --healing-root /mnt/8T/whl/idn_carving_sweep/healing
+python scripts/plot_carving_accuracy_sweep.py
 python scripts/train_gsm8k_improved.py --machine 3090
 scripts/train_eval_all_lora.sh
 python -m pytest
@@ -68,6 +79,16 @@ metrics, giving every capability equal weight.
 For every request it activates all six LoRAs and scales their contributions by the
 six routing probabilities, producing the exact weighted delta without materializing
 a new rank-96 adapter. Each prediction records all routing weights and diagnostics.
+
+`scripts/eval_selective_fallback.py` composes matched routed-LoRA and 7B predictions
+into a selective-serving evaluation. It uses a stratified calibration partition to
+choose per-capability Mahalanobis-distance thresholds, maximizing local coverage
+subject to a one-sided quality constraint, and reports results only on the untouched
+test partition. The `--local-capabilities` list is the package certification policy:
+capabilities not known to match the teacher always fall back. Optional clean student
+and teacher latency artifacts add p50/p95 latency and avoided 7B compute to the plot.
+`scripts/plot_fallback_performance.py` converts the completed JSON report into a
+paper-ready PNG/PDF plus system-level and per-capability Markdown/CSV tables.
 
 `scripts/build_shared_basis.py` decomposes the six complete LoRA delta operators into
 four global shared basis adapters and one exact residual per capability. The global

@@ -68,6 +68,7 @@ main() {
   download_dataset_repo "rajpurkar/squad" "squad"
   download_dataset_repo "abisee/cnn_dailymail" "cnn_dailymail"
   download_dataset_repo "google-research-datasets/mbpp" "mbpp_sanitized"
+  download_dataset_repo "allenai/WildChat-1M" "wildchat_1m"
 
   if [[ "${CONVERT_DATASETS_TO_LOAD_FROM_DISK}" == "1" ]]; then
     echo "Converting datasets to datasets.load_from_disk layout under ${DATASET_DIR}"
@@ -95,6 +96,7 @@ specs = [
     ("rajpurkar/squad", None, "squad"),
     ("abisee/cnn_dailymail", "3.0.0", "cnn_dailymail"),
     ("google-research-datasets/mbpp", "sanitized", "mbpp"),
+    ("allenai/WildChat-1M", None, "wildchat_1m"),
 ]
 
 for repo_id, config_name, local_name in specs:
