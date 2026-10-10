@@ -1,102 +1,275 @@
-# IDN Capability Extraction
+# Intelligence Delivery Network (IDN)
 
-This repository implements the experiment pipeline described in
-`CAPABILITY_EXTRACTION_PLAN.md`.
+IDN is a research prototype for turning broad capabilities in large language
+models into smaller, deployable services. Instead of asking one large model to
+handle every request, IDN explores how to extract task specialists, identify the
+capability a request needs, and run that capability on a smaller model close to
+where it is needed.
 
-Phase 0 provides the package skeleton, YAML config loading and machine overrides,
-the capability registry, and a CLI entry point.
+The long-term vision is an **Intelligence Delivery Network**: a distributed AI
+serving architecture that places and routes intelligence in much the same way
+that a CDN places and routes content. This repository contains the experimental
+model pipeline behind that vision.
 
-```bash
-python -m idn.cli --help
-python -m idn.cli list-capabilities
-python -m idn.cli --machine 3090 train-lora --config configs/capabilities/cola.yaml --rank 16
-python -m idn.cli --machine h100 eval --config configs/capabilities/sst2.yaml --model Qwen2.5-7B-Instruct
-python -m idn.cli --machine h100 visualize-activations --model Qwen2.5-7B-Instruct --capabilities gsm8k,mbpp,cnn_dailymail
-python -m idn.cli --machine 3090 fit-routing --model Qwen2.5-1.5B-Instruct
-python -m idn.cli --machine 3090 route --input "Write Python code to sort a list"
-scripts/build_route_eval_dataset.py --machine 3090
-scripts/eval_oracle_base_lora.sh
-python scripts/eval_routed_lora_mix.py --machine 3090
-python scripts/build_shared_basis.py --components 4
-python scripts/eval_basis_lora_mix.py --machine h100
-python scripts/eval_selective_fallback.py --machine 3090 \
-  --calibration-fraction 0.4 --quality-tolerance 0.0 \
-  --local-capabilities cnn_dailymail,cola,squad,sst2
-python scripts/plot_fallback_performance.py
-python scripts/eval_cross_capability_matrix.py --machine h100 --batch-size 4
-python scripts/plot_wrong_lora_negative_transfer.py
-python scripts/eval_carving_accuracy_sweep.py --machine h100 \
-  --carved-root /mnt/8T/whl/idn_carving_sweep
-python scripts/eval_carving_healing_sweep.py --machine h100 \
-  --healing-root /mnt/8T/whl/idn_carving_sweep/healing
-python scripts/plot_carving_accuracy_sweep.py
-python scripts/train_gsm8k_improved.py --machine 3090
-scripts/train_eval_all_lora.sh
-python -m pytest
+> [!IMPORTANT]
+> IDN is an active research project, not a production serving system. The code
+> currently targets local Qwen2.5 checkpoints and six text benchmarks. Results
+> below show that capability specialization is promising, while robust routing
+> and composition remain open problems.
+
+## What is implemented
+
+- **Capability specialists:** supervised LoRA training and evaluation for six
+  language tasks.
+- **Semantic routing:** a PCA and shrinkage-regularized Mahalanobis router built
+  from base-model hidden states, with confidence and out-of-distribution signals.
+- **Adapter composition:** top-1 selection, probability-weighted LoRA mixing,
+  and an experimental shared-basis representation.
+- **Selective fallback:** calibrated policies that serve a request locally only
+  when a capability package is certified, and otherwise select a larger-model
+  fallback in offline evaluations.
+- **Model extraction:** LOCATE, CARVE, HEAL, and CERTIFY stages for scoring model
+  units, pruning a Qwen2 model, distilling a recovery adapter, and validating the
+  resulting package.
+- **Analysis tools:** capability embedding plots, activation visualizations,
+  cross-capability transfer experiments, and reproducible JSON reports.
+
+The main experimental paths are:
+
+```text
+request -> semantic router -> LoRA specialist or mixture -> local response
+                           +-> confidence/certificate gate -> larger-model fallback
+
+Qwen2 model -> LOCATE -> CARVE -> HEAL -> CERTIFY -> certified experiment artifact
 ```
 
-Machine configs are selected with `--machine 3090` or `--machine h100`. Pass model
-and dataset directories as paths relative to the selected machine config's
-`model_dir` and `data_dir`; the pipeline loads from disk, not from the Hugging
-Face Hub.
+## Current results
 
-`visualize-activations` samples request text from the datasets configured under
-`configs/capabilities`, runs those samples through a local causal LM, averages
-mean absolute hidden-state activations by layer and hidden dimension, and writes
-a self-contained HTML dashboard plus JSON and top-neuron CSV files under
-`artifacts/analysis`.
+The table below summarizes the original completed Qwen2.5 experiment runs. The
+macro score is an unweighted mean across six task-native metrics: ROUGE-L,
+accuracy, exact match, and pass@1. It is useful for within-table comparison, but
+it is not a universal accuracy measure.
 
-`train-lora` performs gold-supervised SFT on prompt-masked targets using the
-frozen Qwen2.5-1.5B base. Defaults come from `configs/train/lora_default.yaml`;
-rank-16 adapters are written to `artifacts/adapters/{capability}/r16` with
-`train_meta.json` lineage and a step-level `training_log.json`.
+| Evaluation | 1.5B base | 1.5B + specialist LoRA | 7B base |
+| --- | ---: | ---: | ---: |
+| Standalone task evaluations | 0.6451 | 0.6933 | 0.7135 |
+| Balanced 1,000-request stream, oracle specialist selection | 0.6224 | 0.6849 | 0.6939 |
 
-`scripts/train_eval_all_lora.sh` lists the train and eval commands for all six
-capabilities.
+Five of six standalone specialists improve over the 1.5B base. With an oracle
+capability label, the specialist system comes within 0.0090 of the 7B model on
+the mixed stream. The current learned router does not yet preserve that gain:
+weighted routing scores 0.6141, versus 0.6224 for the 1.5B base. Most of the gap
+comes from confusing extractive QA with summarization, and wrong adapters can
+cause severe negative transfer. These results motivate the certificate gate and
+fallback path rather than unconditional local execution.
 
-`scripts/train_gsm8k_improved.py` is the experimental GSM8K training path. It uses
-cleaned rationale targets and base-model KL preservation; candidates are evaluated
-at full adapter strength before they can replace the standard adapter.
+## Supported capabilities
 
-`fit-routing` mean-pools the Qwen2.5-1.5B base model's final hidden states for every
-configured capability, fits PCA and shrinkage-regularized Mahalanobis descriptors,
-and writes `artifacts/routing/{space.npz,report.json}`. The report records held-out
-accuracy, coverage, a confusion matrix, and OOD rejection. `route` uses the same base
-model and returns capability weights, distances, entropy, confidence, and OOD status.
+| Capability | Dataset | Primary metric |
+| --- | --- | --- |
+| Summarization | CNN/DailyMail | ROUGE-L |
+| Grammatical acceptability | CoLA | Accuracy (MCC also reported) |
+| Arithmetic reasoning | GSM8K | Exact match |
+| Python code generation | MBPP | pass@1 |
+| Extractive question answering | SQuAD | Exact match (F1 also reported) |
+| Sentiment classification | SST-2 | Accuracy |
 
-`scripts/build_route_eval_dataset.py` creates a deterministic 1,000-example mixed
-end-to-end holdout with prompt inputs, references, gold targets, and a source/overlap
-manifest under `artifacts/eval`.
+## Quick start
 
-`scripts/eval_oracle_base_lora.sh` evaluates that mixed dataset with the 1.5B base
-and with the matching capability LoRA selected from the ground-truth label. It is an
-oracle baseline and does not invoke ROUTE. Each run loads the base once; LoRA mode
-loads all six adapters and switches with `set_adapter`. The aggregate
-`macro_capability_score` is the unweighted mean of the six normalized primary
-metrics, giving every capability equal weight.
+### 1. Install IDN
 
-`scripts/eval_routed_lora_mix.py` evaluates the same stream with semantic ROUTE.
-For every request it activates all six LoRAs and scales their contributions by the
-six routing probabilities, producing the exact weighted delta without materializing
-a new rank-96 adapter. Each prediction records all routing weights and diagnostics.
+Python 3.8 or newer is required. Python 3.10 and a CUDA GPU with bfloat16 support
+are recommended for model workflows. The reference experiments used 24 GB and
+80 GB NVIDIA GPUs; memory needs depend on the model and batch size.
 
-`scripts/eval_selective_fallback.py` composes matched routed-LoRA and 7B predictions
-into a selective-serving evaluation. It uses a stratified calibration partition to
-choose per-capability Mahalanobis-distance thresholds, maximizing local coverage
-subject to a one-sided quality constraint, and reports results only on the untouched
-test partition. The `--local-capabilities` list is the package certification policy:
-capabilities not known to match the teacher always fall back. Optional clean student
-and teacher latency artifacts add p50/p95 latency and avoided 7B compute to the plot.
-`scripts/plot_fallback_performance.py` converts the completed JSON report into a
-paper-ready PNG/PDF plus system-level and per-capability Markdown/CSV tables.
+```bash
+git clone https://github.com/0xLogicLab/IDN.git
+cd IDN
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
 
-`scripts/build_shared_basis.py` decomposes the six complete LoRA delta operators into
-four global shared basis adapters and one exact residual per capability. The global
-Gram eigendecomposition is computed directly from the low-rank factors, without
-materializing dense Qwen deltas. `scripts/eval_basis_lora_mix.py` combines routing
-weights in the four-dimensional coordinate space and adds only the top-routed
-capability residual, scaled by its route probability. It records the route weights,
-shared coordinates, selected residual, predictions, and native capability metrics.
+The pipeline deliberately loads models and datasets from local storage rather
+than downloading them during a run. At minimum, arrange the assets like this:
 
-The current Phase 1 measurements and gate decision are recorded in
-`artifacts/reports/phase1_specialists.json`.
+```text
+/path/to/huggingface/
++-- model/
+|   +-- Qwen2.5-1.5B-Instruct/
+|   +-- Qwen2.5-7B-Instruct/
++-- dataset/
+    +-- cnn_dailymail/
+    +-- glue_cola/
+    +-- glue_sst2/
+    +-- gsm8k/
+    +-- mbpp/
+    +-- squad/
+```
+
+Dataset directories must use the layout produced by
+`datasets.DatasetDict.save_to_disk()`. The helper at
+[`scripts/download_hf_assets.sh`](scripts/download_hf_assets.sh) downloads and
+converts the reference assets. Review its `TARGET_ROOT` and asset list before
+running it because the complete download is large.
+
+### 2. Describe your machine
+
+Machine configurations are intentionally local and ignored by Git. Create
+`configs/machine/local.yaml` with paths for your system:
+
+```yaml
+name: local
+model_dir: /path/to/huggingface/model
+data_dir: /path/to/huggingface/dataset
+device: cuda
+train_batch_size: 1
+eval_batch_size: 1
+local_files_only: true
+```
+
+Pass this file to every command with `--machine`:
+
+```bash
+idn --machine configs/machine/local.yaml list-capabilities
+idn --machine configs/machine/local.yaml list_datasets
+```
+
+Use `list_datasets --no-inspect` to inspect configuration without loading the
+datasets.
+
+### 3. Evaluate a local model
+
+Start with a small evaluation to verify the installation and asset paths:
+
+```bash
+idn --machine configs/machine/local.yaml eval \
+  --config configs/capabilities/sst2.yaml \
+  --model Qwen2.5-1.5B-Instruct \
+  --limit 20 \
+  --output artifacts/eval/sst2_smoke.json
+```
+
+Model names passed to `--model` are resolved relative to `model_dir`. Evaluation
+artifacts include aggregate metrics, run metadata, and per-example predictions.
+
+## Common workflows
+
+Train a rank-16 LoRA specialist:
+
+```bash
+idn --machine configs/machine/local.yaml train-lora \
+  --config configs/capabilities/sst2.yaml \
+  --model Qwen2.5-1.5B-Instruct \
+  --rank 16 \
+  --output artifacts/adapters/sst2/r16
+```
+
+Evaluate the adapter:
+
+```bash
+idn --machine configs/machine/local.yaml eval \
+  --config configs/capabilities/sst2.yaml \
+  --model Qwen2.5-1.5B-Instruct \
+  --adapter artifacts/adapters/sst2/r16 \
+  --output artifacts/eval/sst2_r16.json
+```
+
+Fit the semantic router and route one request:
+
+```bash
+idn --machine configs/machine/local.yaml fit-routing \
+  --model Qwen2.5-1.5B-Instruct
+
+idn --machine configs/machine/local.yaml route \
+  --input "Write Python code to sort a list"
+```
+
+Run the extraction pipeline one stage at a time:
+
+```bash
+# Score capability-relevant Qwen2 units.
+idn --machine configs/machine/local.yaml locate \
+  --config configs/capabilities/sst2.yaml \
+  --model Qwen2.5-1.5B-Instruct
+
+# See all CARVE, HEAL, and CERTIFY options before launching expensive jobs.
+idn carve --help
+idn heal --help
+idn certify --help
+idn gate-eval --help
+```
+
+Inspect a base model or adapter interactively:
+
+```bash
+idn-chat --model /path/to/huggingface/model/Qwen2.5-1.5B-Instruct
+idn-chat --model /path/to/huggingface/model/Qwen2.5-1.5B-Instruct \
+  --adapter artifacts/adapters/sst2/r16
+```
+
+Run `idn --help` or `idn <command> --help` for the complete CLI. The `scripts/`
+directory contains the exact multi-stage experiment drivers used for routing,
+shared-basis composition, selective fallback, and plotting. Read a script before
+running it: some reference paths and batch sizes are specific to the original
+experiment machines. The `gen-teacher`, `build-sft`, `export`, `serve`, and
+`report` commands are currently placeholders.
+
+## Repository layout
+
+```text
+configs/capabilities/  Task prompts, splits, metrics, and quality tolerances
+configs/train/         Default LoRA training configuration
+scripts/               Experiment, evaluation, and plotting entry points
+src/idn/analysis/      Embedding and activation analysis
+src/idn/capabilities/  Dataset adapters, prompts, parsers, and metrics
+src/idn/extraction/    LOCATE, CARVE, HEAL, and CERTIFY implementations
+src/idn/routing/       Semantic routing space and inference
+src/idn/serving/       Certificate gate and selective-serving logic
+src/idn/training/      LoRA training pipeline
+```
+
+Generated models, datasets, and experiment artifacts are excluded from Git
+because of their size. Commands write new outputs under `artifacts/` by default.
+
+## Adding a capability
+
+A new capability needs both a YAML description under `configs/capabilities/`
+and a Python `CapabilitySpec` that loads examples, formats prompts, parses model
+outputs, and computes metrics. Register that spec in
+[`src/idn/registry.py`](src/idn/registry.py). Existing capability modules are the
+best templates for classification, generation, and extractive QA tasks.
+
+## Contributing
+
+Issues and focused pull requests are welcome, especially for reproducibility,
+new capability adapters, routing calibration, extraction quality, and support
+for additional local model families. Please include the command used, relevant
+hardware and software versions, and a small reproducible result when reporting
+experimental behavior.
+
+## Citation
+
+If this repository supports your research, please cite it as:
+
+```bibtex
+@misc{idn2026,
+  title  = {Intelligence Delivery Network: Toward an Internet Architecture for the AI Age},
+  author = {Hanling Wang and Qing Li and Dan Zhao and Yuhong Song and Xingchi Chen and Teng Gao and Peiyuan Zong and Dirk Kutscher and Zhuyun Qi and Yue Yu and Yong Jiang},
+  year   = {2026},
+  url    = {https://github.com/0xLogicLab/IDN}
+}
+```
+
+## License
+
+Unless otherwise noted, IDN source code is licensed under the
+[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). Project-authored
+documentation, papers, and figures are licensed under
+[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
+
+Models, datasets, and other third-party assets are not relicensed by this
+project. Their respective upstream licenses and terms continue to apply. Files
+derived from third-party projects retain their original notices and license
+requirements.
