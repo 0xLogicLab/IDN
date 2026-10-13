@@ -73,6 +73,17 @@ class ChatModel:
         model_type = config.get("model_type")
         return str(model_type) if isinstance(model_type, str) else None
 
+    def _load_causal_lm(self, auto_model_class, model_type, model_kwargs):
+        """Dispatch by architecture; checkpoint size does not affect this choice.
+
+        Hugging Face identifies Qwen2.5 checkpoints as ``model_type=qwen2``,
+        so all Qwen2.5 sizes use IDN's editable Qwen2 implementation. Other
+        text causal-LM architectures use Transformers' AutoModel mapping.
+        """
+        if model_type == "qwen2":
+            return load_local_qwen2_for_causal_lm(self.model_path, **model_kwargs)
+        return auto_model_class.from_pretrained(self.model_path, **model_kwargs)
+
     def load(self) -> "ChatModel":
         try:
             import torch
@@ -144,10 +155,11 @@ class ChatModel:
             if tokenizer.pad_token_id is None:
                 tokenizer.pad_token = tokenizer.eos_token
             tokenizer.padding_side = "left"
-            if model_type == "qwen2":
-                model = load_local_qwen2_for_causal_lm(self.model_path, **kwargs)
-            else:
-                model = AutoModelForCausalLM.from_pretrained(self.model_path, **kwargs)
+            model = self._load_causal_lm(
+                AutoModelForCausalLM,
+                model_type,
+                kwargs,
+            )
             self.tokenizer = tokenizer
 
         if self.adapter_path:
