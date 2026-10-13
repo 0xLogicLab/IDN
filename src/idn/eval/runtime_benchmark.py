@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from idn.capabilities.base import Example
 from idn.eval.dataset import BenchmarkDataset
+from idn.eval.registry import DEFAULT_METRICS, MetricRegistry, MetricSpec, metric_specs_from_config
 from idn.framework.types import InferenceRequest, ResourceBudget
 
 
@@ -36,6 +37,8 @@ def run_runtime_benchmark(
     budget: ResourceBudget = ResourceBudget(),
     tenant_id: str = "wildchat-benchmark",
     quality_scorer: Optional[QualityScorer] = None,
+    metric_specs: Optional[List[MetricSpec]] = None,
+    metric_registry: MetricRegistry = DEFAULT_METRICS,
     metadata: Optional[Mapping[str, Any]] = None,
     progress_every: int = 100,
     overwrite: bool = False,
@@ -59,6 +62,10 @@ def run_runtime_benchmark(
     examples = dataset.load_split(split=split, limit=limit)
     if not examples:
         raise ValueError("dataset split contains no evaluable examples")
+    selected_metrics = list(
+        _dataset_metric_specs(dataset) if metric_specs is None else metric_specs
+    )
+    metric_registry.load_modules(_dataset_metric_modules(dataset))
 
     output_dir = Path(output_dir)
     predictions_path = output_dir / "predictions.jsonl"
@@ -86,6 +93,10 @@ def run_runtime_benchmark(
             "min_quality_lower_bound": budget.min_quality_lower_bound,
         },
         "quality_scorer": getattr(quality_scorer, "__name__", None),
+        "metrics": [
+            {"id": item.metric_id, "alias": item.alias, "options": dict(item.options)}
+            for item in selected_metrics
+        ],
         "metadata": dict(metadata or {}),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -103,6 +114,8 @@ def run_runtime_benchmark(
     warmup_time_s = time.perf_counter() - warmup_started
 
     records: List[Dict[str, Any]] = []
+    parsed_predictions: List[Any] = []
+    references: List[Any] = []
     started = time.perf_counter()
     with predictions_path.open("w", encoding="utf-8", newline="\n") as stream:
         for index, example in enumerate(examples):
@@ -117,6 +130,8 @@ def run_runtime_benchmark(
 
             raw_text = str(response.text)
             parsed = dataset.parse_prediction(raw_text)
+            parsed_predictions.append(parsed)
+            references.append(example.reference)
             record: Dict[str, Any] = {
                 "index": index,
                 "id": example.id,
@@ -149,7 +164,16 @@ def run_runtime_benchmark(
                 )
 
     elapsed_total_s = time.perf_counter() - started
+    task_metrics = _compute_task_metrics(
+        dataset=dataset,
+        metric_specs=selected_metrics,
+        metric_registry=metric_registry,
+        predictions=parsed_predictions,
+        references=references,
+        examples=examples,
+    )
     result = summarize_runtime_benchmark(records, elapsed_total_s=elapsed_total_s)
+    result["task_metrics"] = task_metrics
     result["config"] = config
     result["warmup_time_s"] = warmup_time_s
     _write_json(metrics_path, result)
@@ -273,6 +297,66 @@ def _validate_scores(scores: Mapping[str, float]) -> Dict[str, float]:
             raise ValueError("quality metric names must be non-empty and scores finite")
         result[str(name)] = numeric
     return result
+
+
+def _dataset_metric_specs(dataset: Any) -> List[MetricSpec]:
+    """Get metric declarations exposed by a dataset/capability adapter."""
+
+    config = getattr(dataset, "config", None)
+    if config is not None:
+        configured = getattr(config, "metrics", None)
+        if configured:
+            return list(metric_specs_from_config(config))
+    metric_ids = getattr(dataset, "metric_ids", None)
+    if metric_ids:
+        return [MetricSpec(str(metric_id)) for metric_id in metric_ids]
+    return []
+
+
+def _dataset_metric_modules(dataset: Any) -> List[str]:
+    config = getattr(dataset, "config", None)
+    modules = getattr(config, "metric_modules", None) if config is not None else None
+    return [str(module) for module in (modules or ())]
+
+
+def _compute_task_metrics(
+    *,
+    dataset: Any,
+    metric_specs: List[MetricSpec],
+    metric_registry: MetricRegistry,
+    predictions: List[Any],
+    references: List[Any],
+    examples: List[Example],
+) -> Dict[str, float]:
+    if metric_specs:
+        results: Dict[str, float] = {}
+        for spec in metric_specs:
+            results.update(
+                metric_registry.compute(
+                    spec,
+                    predictions=predictions,
+                    references=references,
+                    examples=examples,
+                )
+            )
+        return results
+
+    # Compatibility path for existing CapabilitySpec implementations.
+    metric = getattr(dataset, "metric", None)
+    if callable(metric):
+        scores = _validate_scores(metric(predictions, references))
+        return {
+            name: {
+                "value": value,
+                "count": len(predictions),
+                "status": "ok",
+                "higher_is_better": None,
+                "metric_id": name,
+                "options": {},
+            }
+            for name, value in scores.items()
+        }
+    return {}
 
 
 def _mean_quality_scores(records: List[Mapping[str, Any]]) -> Dict[str, Any]:

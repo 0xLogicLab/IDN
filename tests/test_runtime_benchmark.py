@@ -3,6 +3,7 @@ import json
 from idn.capabilities.jsonl_chat import JsonlChatDataset
 from idn.capabilities.base import Example
 from idn.eval.runtime_benchmark import run_runtime_benchmark, summarize_runtime_benchmark
+from idn.eval.registry import MetricRegistry, MetricSpec
 from idn.framework.types import InferenceResponse
 
 
@@ -115,3 +116,95 @@ def test_summary_handles_missing_gold_capability():
     summary = summarize_runtime_benchmark(records, elapsed_total_s=1.0)
     assert summary["overall"]["route_capability_accuracy"] is None
     assert summary["by_capability"]["unknown"]["requests"] == 1
+
+
+def test_runtime_benchmark_runs_configured_metric_with_options_and_alias(tmp_path):
+    runtime = TinyRuntime()
+    registry = MetricRegistry()
+    calls = {}
+
+    @registry.register("test.reply_stats@v1")
+    def reply_stats(*, predictions, references, examples, options):
+        calls["options"] = options
+        calls["sizes"] = (len(predictions), len(references), len(examples))
+        return {"matched": 0.5, "nonempty": 1.0}
+
+    result = run_runtime_benchmark(
+        dataset=TinyDataset(),
+        runtime=runtime,
+        split="test",
+        output_dir=tmp_path,
+        warmup_examples=0,
+        metric_specs=[
+            MetricSpec(
+                "test.reply_stats@v1",
+                options={"mode": "strict"},
+                alias="reply",
+            )
+        ],
+        metric_registry=registry,
+        progress_every=0,
+    )
+
+    assert calls == {"options": {"mode": "strict"}, "sizes": (2, 2, 2)}
+    assert result["task_metrics"]["reply.matched"] == {
+        "value": 0.5,
+        "count": 2,
+        "status": "ok",
+        "higher_is_better": None,
+        "metric_id": "test.reply_stats@v1",
+        "options": {"mode": "strict"},
+    }
+
+
+def test_runtime_benchmark_uses_legacy_capability_metric_when_no_metric_specs(tmp_path):
+    class DatasetWithMetric(TinyDataset):
+        def metric(self, predictions, references):
+            return {"legacy_score": 0.75}
+
+    result = run_runtime_benchmark(
+        dataset=DatasetWithMetric(),
+        runtime=TinyRuntime(),
+        split="test",
+        output_dir=tmp_path,
+        warmup_examples=0,
+        progress_every=0,
+    )
+
+    assert result["task_metrics"]["legacy_score"]["value"] == 0.75
+
+
+def test_runtime_benchmark_reads_metric_declarations_from_dataset_config(tmp_path):
+    class ConfiguredDataset(TinyDataset):
+        config = type(
+            "Config",
+            (),
+            {
+                "metrics": [
+                    {
+                        "id": "test.count@v1",
+                        "options": {"offset": 2},
+                    }
+                ],
+                "metric_modules": [],
+            },
+        )()
+
+    registry = MetricRegistry()
+    registry.register(
+        "test.count@v1",
+        lambda *, predictions, references, examples, options: {
+            "count": len(predictions) + options["offset"]
+        },
+    )
+    result = run_runtime_benchmark(
+        dataset=ConfiguredDataset(),
+        runtime=TinyRuntime(),
+        split="test",
+        output_dir=tmp_path,
+        warmup_examples=0,
+        metric_registry=registry,
+        progress_every=0,
+    )
+
+    assert result["task_metrics"]["count"]["value"] == 4.0
