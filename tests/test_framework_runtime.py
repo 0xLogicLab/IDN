@@ -303,14 +303,21 @@ def _write_shared_basis_manifest(path):
         json.dumps(
             {
                 "artifact_version": 1,
-                "capabilities": ["C0", "C2"],
+                "capabilities": ["C0", "C1", "C2", "C3"],
                 "components": 1,
                 "bases": [{"name": "basis_00", "path": "bases/basis_00"}],
                 "residuals": {
                     "C0": {"name": "residual_C0", "path": "residuals/C0"},
+                    "C1": {"name": "residual_C1", "path": "residuals/C1"},
                     "C2": {"name": "residual_C2", "path": "residuals/C2"},
+                    "C3": {"name": "residual_C3", "path": "residuals/C3"},
                 },
-                "coordinates": {"C0": [0.2], "C2": [0.8]},
+                "coordinates": {
+                    "C0": [0.2],
+                    "C1": [0.4],
+                    "C2": [0.8],
+                    "C3": [0.6],
+                },
             }
         ),
         encoding="utf-8",
@@ -322,12 +329,17 @@ def test_shared_basis_resolves_one_hot_package_capability_and_soft_mix(tmp_path)
     _write_shared_basis_manifest(manifest_path)
     strategy = SharedBasisAdapterStrategy()
 
-    one_hot = strategy.resolve(
-        AdaptationSpec("shared_basis", artifact_path=str(manifest_path)),
-        capability="C2",
-    )
-    assert one_hot.active_adapters == ("basis_00", "residual_C2")
-    assert one_hot.scales == {"basis_00": pytest.approx(0.8), "residual_C2": 1.0}
+    expected_coordinates = {"C0": 0.2, "C1": 0.4, "C2": 0.8, "C3": 0.6}
+    for capability, coordinate in expected_coordinates.items():
+        one_hot = strategy.resolve(
+            AdaptationSpec("shared_basis", artifact_path=str(manifest_path)),
+            capability=capability,
+        )
+        assert one_hot.active_adapters == ("basis_00", f"residual_{capability}")
+        assert one_hot.scales == {
+            "basis_00": pytest.approx(coordinate),
+            f"residual_{capability}": 1.0,
+        }
 
     mixed = strategy.resolve(
         AdaptationSpec(
@@ -426,7 +438,7 @@ def test_shared_basis_rejects_missing_or_invalid_capability_coefficients(tmp_pat
     with pytest.raises(AdaptationError, match="package capability"):
         strategy.resolve(
             AdaptationSpec("shared_basis", artifact_path=str(manifest_path)),
-            capability="C1",
+            capability="C4",
         )
     with pytest.raises(AdaptationError, match="sum to one"):
         strategy.resolve(
