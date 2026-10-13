@@ -91,6 +91,17 @@ class JsonlChatDataset:
             raise ValueError("conversation example has no assistant target")
         return ex.gold_target
 
+    def capability_label(self, ex: Example) -> Optional[str]:
+        """Return the optional gold capability used to score routing."""
+        capability = (
+            ex.reference.get("capability")
+            if isinstance(ex.reference, Mapping)
+            else None
+        )
+        if capability is None:
+            capability = ex.prompt_inputs.get("capability")
+        return str(capability) if capability is not None else None
+
     def parse_prediction(self, raw_text: str) -> str:
         return str(raw_text).strip()
 
@@ -116,8 +127,12 @@ class JsonlChatDataset:
             if normalized is not None:
                 messages.append(normalized)
 
-        raw_capability = row.get(self.capability_field, self.id)
-        capability = self.capability_map.get(str(raw_capability), str(raw_capability))
+        raw_capability = row.get(self.capability_field)
+        capability = (
+            self.capability_map.get(str(raw_capability), str(raw_capability))
+            if raw_capability is not None
+            else None
+        )
         if self.capability_filter is not None and capability not in self.capability_filter:
             return []
 
