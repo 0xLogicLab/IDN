@@ -1,10 +1,14 @@
 import json
+import sys
+from types import ModuleType
 from types import SimpleNamespace
 
 import pytest
 
 from idn.capabilities.jsonl_chat import JsonlChatDataset
 from idn.framework import (
+    AdaptationSpec,
+    AdaptationStrategyRegistry,
     DatasetRegistry,
     IDNRuntime,
     InMemoryResponseCache,
@@ -17,6 +21,7 @@ from idn.framework import (
     RuntimePolicy,
     build_default_dataset_registry,
 )
+from idn.framework.adapters import AdaptationError, SharedBasisAdapterStrategy
 from idn.framework.runtime import FrameworkError
 from idn.models.loader import ChatModel
 
@@ -291,6 +296,176 @@ def test_provider_registry_dispatches_by_package_provider_id():
 
     assert result.package_id == "math-7b"
     assert fake_provider.calls == [("math-7b", "solve 2+2")]
+
+
+def _write_shared_basis_manifest(path):
+    path.write_text(
+        json.dumps(
+            {
+                "artifact_version": 1,
+                "capabilities": ["C0", "C2"],
+                "components": 1,
+                "bases": [{"name": "basis_00", "path": "bases/basis_00"}],
+                "residuals": {
+                    "C0": {"name": "residual_C0", "path": "residuals/C0"},
+                    "C2": {"name": "residual_C2", "path": "residuals/C2"},
+                },
+                "coordinates": {"C0": [0.2], "C2": [0.8]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_shared_basis_resolves_one_hot_package_capability_and_soft_mix(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    _write_shared_basis_manifest(manifest_path)
+    strategy = SharedBasisAdapterStrategy()
+
+    one_hot = strategy.resolve(
+        AdaptationSpec("shared_basis", artifact_path=str(manifest_path)),
+        capability="C2",
+    )
+    assert one_hot.active_adapters == ("basis_00", "residual_C2")
+    assert one_hot.scales == {"basis_00": pytest.approx(0.8), "residual_C2": 1.0}
+
+    mixed = strategy.resolve(
+        AdaptationSpec(
+            "shared_basis",
+            artifact_path=str(manifest_path),
+            coefficients={"C0": 0.25, "C2": 0.75},
+        ),
+        capability="C0",
+    )
+    assert mixed.active_adapters == ("basis_00", "residual_C2")
+    assert mixed.scales["basis_00"] == pytest.approx(0.65)
+    assert mixed.scales["residual_C2"] == pytest.approx(0.75)
+
+
+def test_shared_basis_accepts_direct_signed_basis_coefficients(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    _write_shared_basis_manifest(manifest_path)
+
+    resolved = SharedBasisAdapterStrategy().resolve(
+        AdaptationSpec(
+            "shared_basis",
+            artifact_path=str(manifest_path),
+            coefficients={"basis_00": -0.35},
+            coefficient_space="basis",
+            options={"residual_scale": 0.4},
+        ),
+        capability="C2",
+    )
+
+    assert resolved.active_adapters == ("basis_00", "residual_C2")
+    assert resolved.scales == {
+        "basis_00": pytest.approx(-0.35),
+        "residual_C2": pytest.approx(0.4),
+    }
+
+
+def test_shared_basis_strategy_loads_and_activates_composed_adapters(
+    tmp_path, monkeypatch
+):
+    manifest_path = tmp_path / "manifest.json"
+    _write_shared_basis_manifest(manifest_path)
+    calls = {"loaded": [], "active": [], "scales": {}}
+
+    class FakeLoraLayer:
+        def set_scale(self, name, value):
+            calls["scales"][name] = value
+
+    class FakePeftModel:
+        @classmethod
+        def from_pretrained(cls, base, path, **kwargs):
+            calls["loaded"].append((path, kwargs["adapter_name"]))
+            return cls()
+
+        def __init__(self):
+            self.layer = FakeLoraLayer()
+            self.base_model = SimpleNamespace(
+                set_adapter=lambda names: calls["active"].append(names)
+            )
+
+        def load_adapter(self, path, *, adapter_name, **kwargs):
+            calls["loaded"].append((path, adapter_name))
+
+        def modules(self):
+            return [self.layer]
+
+        def eval(self):
+            return self
+
+    peft_module = ModuleType("peft")
+    peft_module.PeftModel = FakePeftModel
+    peft_tuners = ModuleType("peft.tuners")
+    peft_lora = ModuleType("peft.tuners.lora")
+    peft_lora.LoraLayer = FakeLoraLayer
+    monkeypatch.setitem(sys.modules, "peft", peft_module)
+    monkeypatch.setitem(sys.modules, "peft.tuners", peft_tuners)
+    monkeypatch.setitem(sys.modules, "peft.tuners.lora", peft_lora)
+
+    result = SharedBasisAdapterStrategy().apply(
+        "base-model",
+        AdaptationSpec("shared_basis", artifact_path=str(manifest_path)),
+        capability="C2",
+        local_files_only=True,
+    )
+
+    assert isinstance(result, FakePeftModel)
+    assert [name for _, name in calls["loaded"]] == ["basis_00", "residual_C2"]
+    assert calls["active"] == [["basis_00", "residual_C2"]]
+    assert calls["scales"] == {"basis_00": pytest.approx(0.8), "residual_C2": 1.0}
+
+
+def test_shared_basis_rejects_missing_or_invalid_capability_coefficients(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    _write_shared_basis_manifest(manifest_path)
+    strategy = SharedBasisAdapterStrategy()
+
+    with pytest.raises(AdaptationError, match="package capability"):
+        strategy.resolve(
+            AdaptationSpec("shared_basis", artifact_path=str(manifest_path)),
+            capability="C1",
+        )
+    with pytest.raises(AdaptationError, match="sum to one"):
+        strategy.resolve(
+            AdaptationSpec(
+                "shared_basis",
+                artifact_path=str(manifest_path),
+                coefficients={"C0": 0.2, "C2": 0.2},
+            ),
+            capability="C2",
+        )
+
+
+def test_adaptation_registry_accepts_custom_strategy():
+    class FakeAdaptation:
+        strategy_id = "test-custom"
+
+        def apply(self, model, spec, *, capability, local_files_only):
+            return (model, spec.strategy_id, capability, local_files_only)
+
+    registry = AdaptationStrategyRegistry([FakeAdaptation()])
+    spec = AdaptationSpec("test-custom", artifact_path="custom-artifact")
+
+    assert registry.apply(
+        "base-model",
+        spec,
+        capability="C2",
+        local_files_only=True,
+    ) == ("base-model", "test-custom", "C2", True)
+
+
+def test_model_package_rejects_ambiguous_legacy_and_generic_adaptation_fields():
+    with pytest.raises(ValueError, match="not both"):
+        ModelPackage(
+            package_id="ambiguous",
+            capability="math",
+            model_path="/models/base",
+            adapter_path="/adapters/legacy",
+            adaptation=AdaptationSpec("lora", artifact_path="/adapters/new"),
+        )
 
 
 def test_openai_compatible_provider_uses_backend_model_id_and_chat_api():

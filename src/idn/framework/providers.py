@@ -11,6 +11,10 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from idn.framework.types import InferenceRequest, ModelPackage
+from idn.framework.adapters import (
+    AdaptationStrategyRegistry,
+    build_default_adaptation_registry,
+)
 from idn.models.loader import ChatModel
 
 
@@ -58,6 +62,7 @@ class TransformersProvider:
         device: str = "cuda",
         local_files_only: bool = True,
         max_loaded_models: int = 1,
+        adaptation_registry: Optional[AdaptationStrategyRegistry] = None,
     ) -> None:
         if max_loaded_models <= 0:
             raise ValueError("max_loaded_models must be positive")
@@ -65,6 +70,9 @@ class TransformersProvider:
         self.device = device
         self.local_files_only = local_files_only
         self.max_loaded_models = int(max_loaded_models)
+        self.adaptation_registry = (
+            adaptation_registry or build_default_adaptation_registry()
+        )
         self._models: OrderedDict[str, ChatModel] = OrderedDict()
         self._lock = RLock()
 
@@ -100,6 +108,9 @@ class TransformersProvider:
         model = ChatModel(
             model_path=package.model_path,
             adapter_path=package.adapter_path,
+            adaptation=package.adaptation,
+            adaptation_capability=package.capability,
+            adaptation_registry=self.adaptation_registry,
             dtype=self.dtype,
             device=self.device,
             local_files_only=self.local_files_only,
@@ -138,6 +149,11 @@ class OpenAICompatibleProvider:
         self._opener = opener or urlopen
 
     def generate(self, package: ModelPackage, request: InferenceRequest) -> str:
+        if package.adapter_path or package.adaptation is not None:
+            raise ProviderError(
+                "OpenAI-compatible backends do not compose local adaptation artifacts; "
+                "serve the composed package remotely and set backend_model_id"
+            )
         model_id = package.backend_model_id or package.package_id
         payload = {
             "model": model_id,

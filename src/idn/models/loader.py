@@ -7,7 +7,11 @@ import os
 from threading import Thread
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional
+
+if TYPE_CHECKING:
+    from idn.framework.adapters import AdaptationStrategyRegistry
+    from idn.framework.types import AdaptationSpec
 
 os.environ.setdefault("USE_TF", "0")
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
@@ -54,6 +58,9 @@ class ChatModel:
     dtype: str = "bfloat16"
     device: str = "cuda"
     local_files_only: bool = True
+    adaptation: Optional[AdaptationSpec] = None
+    adaptation_capability: Optional[str] = None
+    adaptation_registry: Optional[AdaptationStrategyRegistry] = None
 
     def __post_init__(self) -> None:
         validate_dtype(self.dtype)
@@ -162,16 +169,40 @@ class ChatModel:
             )
             self.tokenizer = tokenizer
 
-        if self.adapter_path:
-            try:
-                from peft import PeftModel
-            except ImportError as exc:
-                raise ModelLoadError("peft is required to load LoRA adapters") from exc
-            model = PeftModel.from_pretrained(
-                model,
-                self.adapter_path,
-                local_files_only=self.local_files_only,
+        adaptation = self.adaptation
+        if self.adapter_path and adaptation is not None:
+            raise ModelLoadError(
+                "use either legacy adapter_path or adaptation, not both"
             )
+        if adaptation is None and self.adapter_path:
+            # Backward compatibility for existing callers and configurations.
+            from idn.framework.types import AdaptationSpec
+
+            adaptation = AdaptationSpec(
+                strategy_id="lora",
+                artifact_path=self.adapter_path,
+            )
+        if adaptation is not None:
+            from idn.framework.adapters import build_default_adaptation_registry
+
+            strategy_registry = (
+                self.adaptation_registry or build_default_adaptation_registry()
+            )
+            try:
+                model = strategy_registry.apply(
+                    model,
+                    adaptation,
+                    capability=self.adaptation_capability,
+                    local_files_only=self.local_files_only,
+                )
+            except Exception as exc:
+                if isinstance(exc, ModelLoadError):
+                    raise
+                raise ModelLoadError(
+                    "could not apply adaptation strategy {0}: {1}".format(
+                        adaptation.strategy_id, exc
+                    )
+                ) from exc
 
         model.eval()
         if tokenizer is not None:

@@ -3,8 +3,47 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+
+
+@dataclass(frozen=True)
+class AdaptationSpec:
+    """Describe how a model package adapts its base model.
+
+    ``strategy_id`` selects a registered loader strategy. ``artifact_path`` is
+    a LoRA directory for ``lora`` or a shared-basis ``manifest.json`` for
+    ``shared_basis``. For shared bases, ``coefficients`` may contain weights
+    over capabilities (default: one-hot for the package capability), or direct
+    basis coefficients when ``coefficient_space="basis"``.
+
+    ``options`` is reserved for strategy-specific settings so new adaptation
+    methods can be added without changing ``ModelPackage`` again.
+    """
+
+    strategy_id: str
+    artifact_path: Optional[str] = None
+    coefficients: Mapping[str, float] = field(default_factory=dict)
+    coefficient_space: str = "capability"
+    options: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.strategy_id.strip():
+            raise ValueError("adaptation strategy_id cannot be empty")
+        if self.artifact_path is not None and not self.artifact_path.strip():
+            raise ValueError("adaptation artifact_path cannot be empty")
+        if self.coefficient_space not in ("capability", "basis"):
+            raise ValueError(
+                "coefficient_space must be 'capability' or 'basis'"
+            )
+        coefficients = dict(self.coefficients)
+        for name, value in coefficients.items():
+            if not str(name).strip():
+                raise ValueError("coefficient names cannot be empty")
+            if not math.isfinite(float(value)):
+                raise ValueError("coefficient values must be finite")
+        object.__setattr__(self, "coefficients", coefficients)
+        object.__setattr__(self, "options", dict(self.options))
 
 
 @dataclass(frozen=True)
@@ -82,6 +121,7 @@ class ModelPackage:
     provider_id: str = "default"
     backend_model_id: Optional[str] = None
     is_remote: bool = False
+    adaptation: Optional[AdaptationSpec] = None
 
     def __post_init__(self) -> None:
         if not self.package_id:
@@ -92,6 +132,10 @@ class ModelPackage:
             raise ValueError("model_path cannot be empty")
         if not self.provider_id.strip():
             raise ValueError("provider_id cannot be empty")
+        if self.adapter_path and self.adaptation is not None:
+            raise ValueError(
+                "use either legacy adapter_path or adaptation, not both"
+            )
         if self.capability is None and not self.is_fallback:
             raise ValueError("a package without a capability must be a fallback")
         for name in (
