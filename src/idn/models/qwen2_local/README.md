@@ -8,4 +8,8 @@ Current state:
   Transformers Qwen2 implementation.
 - Imports are rewritten to use absolute `transformers.*` utility modules.
 - `ChatModel` routes `model_type: qwen2` checkpoints through this backend.
+- Qwen2.5 1.5B, 7B, 14B, and 72B checkpoints share this architecture route; each
+  size still needs its own external weight directory and resource profile.
+- Other supported text causal-LM architectures use Transformers' automatic
+  model mapping. Architecture-specific extraction operations remain separate.
 

@@ -37,7 +37,7 @@ MACHINE_FIELDS = {
 class CapabilityConfig:
     id: str
     name: str
-    metric_name: str
+    metric_name: Optional[str]
     secondary_metrics: List[str]
     higher_is_better: bool
     dataset_path: str
@@ -48,6 +48,9 @@ class CapabilityConfig:
     epsilon: float
     target_source: str
     prompt_template: str
+    metrics: List[Mapping[str, Any]] = None
+    metric_modules: List[str] = None
+    task_type: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +121,15 @@ def load_resolved_config(
     capability_raw = _required_mapping(raw, "capability", capability_path)
     machine_raw = _required_mapping(raw, "machine", machine_path)
     machine = _machine_config_from_raw(machine_raw)
+    metric_configs = _optional_metrics(capability_raw)
+    metric_name = capability_raw.get("metric_name")
+    if metric_name is not None and (not isinstance(metric_name, str) or not metric_name):
+        raise ConfigError("Field must be a non-empty string: metric_name")
+    if metric_name is None and not metric_configs:
+        raise ConfigError("capability must define metric_name or metrics")
+    task_type = capability_raw.get("task_type")
+    if task_type is not None and (not isinstance(task_type, str) or not task_type.strip()):
+        raise ConfigError("Field must be a non-empty string: task_type")
     dataset_path = resolve_relative_dir(
         base_dir=machine.data_dir,
         relative_dir=_required_str(capability_raw, "dataset_path"),
@@ -127,7 +139,7 @@ def load_resolved_config(
     capability = CapabilityConfig(
         id=_required_str(capability_raw, "id"),
         name=_required_str(capability_raw, "name"),
-        metric_name=_required_str(capability_raw, "metric_name"),
+        metric_name=metric_name,
         secondary_metrics=_optional_str_list(capability_raw, "secondary_metrics"),
         higher_is_better=_required_bool(capability_raw, "higher_is_better"),
         dataset_path=dataset_path,
@@ -138,6 +150,9 @@ def load_resolved_config(
         epsilon=float(capability_raw.get("epsilon", 0.0)),
         target_source=_required_str(capability_raw, "target_source"),
         prompt_template=_prompt_template(capability_raw),
+        metrics=metric_configs,
+        metric_modules=_optional_str_list(capability_raw, "metric_modules"),
+        task_type=task_type,
     )
     return ResolvedConfig(capability=capability, machine=machine, raw=raw)
 
@@ -241,6 +256,36 @@ def _optional_str_list(raw: Mapping[str, Any], key: str) -> List[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ConfigError("Field must be a list of strings: {0}".format(key))
     return list(value)
+
+
+def _optional_metrics(raw: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+    """Read the extensible metric declarations without breaking legacy YAML."""
+
+    value = raw.get("metrics", [])
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ConfigError("Field must be a list: metrics")
+    result = []
+    for item in value:
+        if isinstance(item, str):
+            result.append({"id": item})
+        elif isinstance(item, Mapping):
+            metric_id = item.get("id", item.get("metric_id"))
+            if not isinstance(metric_id, str) or not metric_id.strip():
+                raise ConfigError("Each metrics item needs a non-empty id")
+            options = item.get("options", {})
+            if not isinstance(options, Mapping):
+                raise ConfigError("metrics.options must be a mapping")
+            normalized = {"id": metric_id, "options": dict(options)}
+            if "alias" in item:
+                if not isinstance(item["alias"], str) or not item["alias"].strip():
+                    raise ConfigError("metrics.alias must be a non-empty string")
+                normalized["alias"] = item["alias"]
+            result.append(normalized)
+        else:
+            raise ConfigError("metrics items must be strings or mappings")
+    return result
 
 
 def _reject_unknown_fields(
